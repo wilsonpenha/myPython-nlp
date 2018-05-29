@@ -1,0 +1,1430 @@
+
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.5/d3.min.js"></script>
+
+<link rel="stylesheet" type="text/css" href="https://cdn.rawgit.com/bmabey/pyLDAvis/files/ldavis.v1.0.0.css">
+
+<div id="ldavis_el1911771396656165339281508491739" width="100%" align="center"></div>
+<script type="text/javascript">
+
+/* Original code taken from https://github.com/cpsievert/LDAvis */
+/* Copyright 2013, AT&T Intellectual Property */
+/* MIT Licence */
+
+'use strict';
+
+var LDAvis = function(to_select, data_or_file_name) { //added additional input variable
+
+    // This section sets up the logic for event handling
+    var current_clicked = {
+        what: "nothing",
+        element: undefined
+    },
+        current_hover = {
+            what: "nothing",
+            element: undefined
+        },
+        old_winning_state = {
+            what: "nothing",
+            element: undefined
+        },
+        vis_state = {
+            lambda: 1,
+            topic: 0,
+            term: ""
+        };
+
+    // Set up a few 'global' variables to hold the data:
+    var K, // number of topics
+        R, // number of terms to display in bar chart
+        mdsData, // (x,y) locations and topic proportions
+        mdsData3, // topic proportions for all terms in the viz
+        lamData, // all terms that are among the top-R most relevant for all topics, lambda values
+        lambda = {
+            old: 1,
+            current: 1
+        },
+         // --------- for THE ONE ---------
+        topicNames = [],
+        // --------- nomore for THE ONE -----------
+        color1 = "#1f77b4", // baseline color for default topic circles and overall term frequencies
+        color2 = "#d62728"; // 'highlight' color for selected topics and term-topic frequencies
+
+    // Set the duration of each half of the transition:
+    var duration = 750;
+
+    // Set global margins used for everything
+    var margin = {
+        top: 30,
+        right: 30,
+        bottom: 70,
+        left: 30
+    },
+        mdswidth = 530,
+        mdsheight = 530,
+        barwidth = 530,
+        barheight = 530,
+        termwidth = 90, // width to add between two panels to display terms
+        mdsarea = mdsheight * mdswidth;
+    // controls how big the maximum circle can be
+    // doesn't depend on data, only on mds width and height:
+    var rMax = 60;
+
+    // proportion of area of MDS plot to which the sum of default topic circle areas is set
+    var circle_prop = 0.25;
+    var word_prop = 0.25;
+
+    // opacity of topic circles:
+    var base_opacity = 0.2,
+        highlight_opacity = 0.6;
+
+    // topic/lambda selection names are specific to *this* vis
+    var topic_select = to_select + "-topic";
+    var lambda_select = to_select + "-lambda";
+
+    // get rid of the # in the to_select (useful) for setting ID values
+    var visID = to_select.replace("#", "");
+    var topicID = visID + "-topic";
+    var lambdaID = visID + "-lambda";
+    var termID = visID + "-term";
+    var topicDown = topicID + "-down";
+    var topicUp = topicID + "-up";
+    var topicClear = topicID + "-clear";
+
+    var leftPanelID = visID + "-leftpanel";
+    var barFreqsID = visID + "-bar-freqs";
+    var topID = visID + "-top";
+    var lambdaInputID = visID + "-lambdaInput";
+    var lambdaZeroID = visID + "-lambdaZero";
+    var sliderDivID = visID + "-sliderdiv";
+    var lambdaLabelID = visID + "-lamlabel";
+    
+
+    //////////////////////////////////////////////////////////////////////////////
+
+    // sort array according to a specified object key name
+    // Note that default is decreasing sort, set decreasing = -1 for increasing
+    // adpated from http://stackoverflow.com/questions/16648076/sort-array-on-key-value
+    function fancysort(key_name, decreasing) {
+        decreasing = (typeof decreasing === "undefined") ? 1 : decreasing;
+        return function(a, b) {
+            if (a[key_name] < b[key_name])
+                return 1 * decreasing;
+            if (a[key_name] > b[key_name])
+                return -1 * decreasing;
+            return 0;
+        };
+    }
+
+
+    function visualize(data) {
+        // set the number of topics to global variable K:
+        K = data['mdsDat'].x.length;
+
+        // R is the number of top relevant (or salient) words whose bars we display
+        R = Math.min(data['R'], 30);
+
+        // ----------- fuse for THE ONE ------------
+        var cut_names=0;
+        if(data['mdsDat'].hasOwnProperty('topic.names')){ //if by anycase length of NAMES variable doesn't match overall amount of topics OR variable doesnt exists - set names to numbers
+            if (K!=data['mdsDat']['topic.names'].length){
+                cut_names=1;
+            }
+        } else{
+            cut_names=1;
+        }
+        if (cut_names==1) {
+            for (var i = 0; i < K; i++) {
+                topicNames[i] = i+1;
+            }
+        }
+        else{
+            for (var i = 0; i < K; i++) {
+                topicNames[i] = data['mdsDat']['topic.names'][i];
+            }
+        }
+        // ----------- enough for THE ONE ------------
+        
+        // a (K x 5) matrix with columns x, y, topics, Freq, cluster (where x and y are locations for left panel)
+        mdsData = [];
+        for (var i = 0; i < K; i++) {
+            var obj = {};
+            for (var key in data['mdsDat']) {
+                obj[key] = data['mdsDat'][key][i];
+            }
+            mdsData.push(obj);
+        }
+
+        // a huge matrix with 3 columns: Term, Topic, Freq, where Freq is all non-zero probabilities of topics given terms
+        // for the terms that appear in the barcharts for this data
+        mdsData3 = [];
+        for (var i = 0; i < data['token.table'].Term.length; i++) {
+            var obj = {};
+            for (var key in data['token.table']) {
+                obj[key] = data['token.table'][key][i];
+            }
+            mdsData3.push(obj);
+        }
+
+        // large data for the widths of bars in bar-charts. 6 columns: Term, logprob, loglift, Freq, Total, Category
+        // Contains all possible terms for topics in (1, 2, ..., k) and lambda in the user-supplied grid of lambda values
+        // which defaults to (0, 0.01, 0.02, ..., 0.99, 1).
+        lamData = [];
+        for (var i = 0; i < data['tinfo'].Term.length; i++) {
+            var obj = {};
+            for (var key in data['tinfo']) {
+                obj[key] = data['tinfo'][key][i];
+            }
+            lamData.push(obj);
+        }
+        var dat3 = lamData.slice(0, R);
+
+        // Create the topic input & lambda slider forms. Inspired from:
+        // http://bl.ocks.org/d3noob/10632804
+        // http://bl.ocks.org/d3noob/10633704
+        init_forms(topicID, lambdaID, visID);
+
+        // When the value of lambda changes, update the visualization
+        console.log('lambda_select', lambda_select);
+        d3.select(lambda_select)
+            .on("mouseup", function() {
+                console.log('lambda_select mouseup');
+                // store the previous lambda value
+                lambda.old = lambda.current;
+                lambda.current = document.getElementById(lambdaID).value;
+                vis_state.lambda = +this.value;
+                // adjust the text on the range slider
+                d3.select(lambda_select).property("value", vis_state.lambda);
+                d3.select(lambda_select + "-value").text(vis_state.lambda);
+                // transition the order of the bars
+                var increased = lambda.old < vis_state.lambda;
+                if (vis_state.topic > 0) reorder_bars(increased);
+                // store the current lambda value
+                state_save(true);
+                document.getElementById(lambdaID).value = vis_state.lambda;
+            });
+
+        d3.select("#" + topicUp)
+            .on("click", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                var value_old = document.getElementById(topicID).value;
+                var value_new = Math.min(K, +value_old + 1).toFixed(0);
+                // increment the value in the input box
+                document.getElementById(topicID).value = value_new;
+                topic_off(document.getElementById(topicID + value_old));
+                topic_on(document.getElementById(topicID + value_new));
+                vis_state.topic = value_new;
+                state_save(true);
+            });
+
+        d3.select("#" + topicDown)
+            .on("click", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                var value_old = document.getElementById(topicID).value;
+                var value_new = Math.max(0, +value_old - 1).toFixed(0);
+                // increment the value in the input box
+                document.getElementById(topicID).value = value_new;
+                topic_off(document.getElementById(topicID + value_old));
+                topic_on(document.getElementById(topicID + value_new));
+                vis_state.topic = value_new;
+                state_save(true);
+            });
+
+        d3.select("#" + topicID)
+            .on("keyup", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                topic_off(document.getElementById(topicID + vis_state.topic));
+                var value_new = document.getElementById(topicID).value;
+                if (!isNaN(value_new) && value_new > 0) {
+                    value_new = Math.min(K, Math.max(1, value_new));
+                    topic_on(document.getElementById(topicID + value_new));
+                    vis_state.topic = value_new;
+                    state_save(true);
+                    document.getElementById(topicID).value = vis_state.topic;
+                }
+            });
+
+        d3.select("#" + topicClear)
+            .on("click", function() {
+                state_reset();
+                state_save(true);
+            });
+
+        // create linear scaling to pixels (and add some padding on outer region of scatterplot)
+        var xrange = d3.extent(mdsData, function(d) {
+            return d.x;
+        }); //d3.extent returns min and max of an array
+        var xdiff = xrange[1] - xrange[0],
+            xpad = 0.05;
+        var yrange = d3.extent(mdsData, function(d) {
+            return d.y;
+        });
+        var ydiff = yrange[1] - yrange[0],
+            ypad = 0.05;
+
+        if (xdiff > ydiff) {
+            var xScale = d3.scale.linear()
+                    .range([0, mdswidth])
+                    .domain([xrange[0] - xpad * xdiff, xrange[1] + xpad * xdiff]);
+
+            var yScale = d3.scale.linear()
+                    .range([mdsheight, 0])
+                    .domain([yrange[0] - 0.5*(xdiff - ydiff) - ypad*xdiff, yrange[1] + 0.5*(xdiff - ydiff) + ypad*xdiff]);
+        } else {
+            var xScale = d3.scale.linear()
+                    .range([0, mdswidth])
+                    .domain([xrange[0] - 0.5*(ydiff - xdiff) - xpad*ydiff, xrange[1] + 0.5*(ydiff - xdiff) + xpad*ydiff]);
+
+            var yScale = d3.scale.linear()
+                    .range([mdsheight, 0])
+                    .domain([yrange[0] - ypad * ydiff, yrange[1] + ypad * ydiff]);
+        }
+
+        // Create new svg element (that will contain everything):
+        var svg = d3.select(to_select).append("svg")
+                .attr("width", mdswidth + barwidth + margin.left + termwidth + margin.right)
+                .attr("height", mdsheight + 2 * margin.top + margin.bottom + 2 * rMax);
+
+        // Create a group for the mds plot
+        var mdsplot = svg.append("g")
+                .attr("id", leftPanelID)
+                .attr("class", "points")
+                .attr("transform", "translate(" + margin.left + "," + 2 * margin.top + ")");
+
+        // Clicking on the mdsplot should clear the selection
+        mdsplot
+            .append("rect")
+            .attr("x", 0)
+            .attr("y", 0)
+            .attr("height", mdsheight)
+            .attr("width", mdswidth)
+            .style("fill", color1)
+            .attr("opacity", 0)
+            .on("click", function() {
+                state_reset();
+                state_save(true);
+            });
+
+        mdsplot.append("line") // draw x-axis
+            .attr("x1", 0)
+            .attr("x2", mdswidth)
+            .attr("y1", mdsheight / 2)
+            .attr("y2", mdsheight / 2)
+            .attr("stroke", "gray")
+            .attr("opacity", 0.3);
+        mdsplot.append("text") // label x-axis
+            .attr("x", 0)
+            .attr("y", mdsheight/2 - 5)
+            .text(data['plot.opts'].xlab)
+            .attr("fill", "gray");
+
+        mdsplot.append("line") // draw y-axis
+            .attr("x1", mdswidth / 2)
+            .attr("x2", mdswidth / 2)
+            .attr("y1", 0)
+            .attr("y2", mdsheight)
+            .attr("stroke", "gray")
+            .attr("opacity", 0.3);
+        mdsplot.append("text") // label y-axis
+            .attr("x", mdswidth/2 + 5)
+            .attr("y", 7)
+            .text(data['plot.opts'].ylab)
+            .attr("fill", "gray");
+
+        // new definitions based on fixing the sum of the areas of the default topic circles:
+        var newSmall = Math.sqrt(0.02*mdsarea*circle_prop/Math.PI);
+        var newMedium = Math.sqrt(0.05*mdsarea*circle_prop/Math.PI);
+        var newLarge = Math.sqrt(0.10*mdsarea*circle_prop/Math.PI);
+        var cx = 10 + newLarge,
+            cx2 = cx + 1.5 * newLarge;
+
+        // circle guide inspired from
+        // http://www.nytimes.com/interactive/2012/02/13/us/politics/2013-budget-proposal-graphic.html?_r=0
+        var circleGuide = function(rSize, size) {
+            d3.select("#" + leftPanelID).append("circle")
+                .attr('class', "circleGuide" + size)
+                .attr('r', rSize)
+                .attr('cx', cx)
+                .attr('cy', mdsheight + rSize)
+                .style('fill', 'none')
+                .style('stroke-dasharray', '2 2')
+                .style('stroke', '#999');
+            d3.select("#" + leftPanelID).append("line")
+                .attr('class', "lineGuide" + size)
+                .attr("x1", cx)
+                .attr("x2", cx2)
+                .attr("y1", mdsheight + 2 * rSize)
+                .attr("y2", mdsheight + 2 * rSize)
+                .style("stroke", "gray")
+                .style("opacity", 0.3);
+        };
+
+        circleGuide(newSmall, "Small");
+        circleGuide(newMedium, "Medium");
+        circleGuide(newLarge, "Large");
+
+        var defaultLabelSmall = "2%";
+        var defaultLabelMedium = "5%";
+        var defaultLabelLarge = "10%";
+
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", 10)
+            .attr("y", mdsheight - 10)
+            .attr('class', "circleGuideTitle")
+            .style("text-anchor", "left")
+            .style("fontWeight", "bold")
+            .text("Marginal topic distribtion");
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newSmall)
+            .attr('class', "circleGuideLabelSmall")
+            .style("text-anchor", "start")
+            .text(defaultLabelSmall);
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newMedium)
+            .attr('class', "circleGuideLabelMedium")
+            .style("text-anchor", "start")
+            .text(defaultLabelMedium);
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newLarge)
+            .attr('class', "circleGuideLabelLarge")
+            .style("text-anchor", "start")
+            .text(defaultLabelLarge);
+
+        // bind mdsData to the points in the left panel:
+        var points = mdsplot.selectAll("points")
+                .data(mdsData)
+                .enter();
+
+        // text to indicate topic
+        // ------------------ THE ONE -------------------
+        points.append("text")
+            .attr("class", "txt")
+            .attr("x", function(d) {
+                return (xScale(+d.x));
+            })
+            .attr("y", function(d) {
+                return (yScale(+d.y) + 4);
+            })
+            //.attr("stroke", "black")
+            .attr("opacity", 1)
+            .style("text-anchor", "middle")
+            .style("font-size", "12px")
+            .style("fontWeight", 100)
+            .text(function(d) {
+                return topicNames[d.topics-1]; // only one that changed from d.topics to topicNames[d.topics-1]
+            });
+        // ------------------ THE ONE finished-------------------
+
+        // draw circles
+        points.append("circle")
+            .attr("class", "dot")
+            .style("opacity", 0.2)
+            .style("fill", color1)
+            .attr("r", function(d) {
+                //return (rScaleMargin(+d.Freq));
+                return (Math.sqrt((d.Freq/100)*mdswidth*mdsheight*circle_prop/Math.PI));
+            })
+            .attr("cx", function(d) {
+                return (xScale(+d.x));
+            })
+            .attr("cy", function(d) {
+                return (yScale(+d.y));
+            })
+            .attr("stroke", "black")
+            .attr("id", function(d) {
+                return (topicID + d.topics);
+                
+            })
+            .on("mouseover", function(d) {
+                var old_topic = topicID + vis_state.topic;
+                if (vis_state.topic > 0 && old_topic != this.id) {
+                    topic_off(document.getElementById(old_topic));
+                }
+                topic_on(this);
+            })
+            .on("click", function(d) {
+                // prevent click event defined on the div container from firing
+                // http://bl.ocks.org/jasondavies/3186840
+                d3.event.stopPropagation();
+                var old_topic = topicID + vis_state.topic;
+                if (vis_state.topic > 0 && old_topic != this.id) {
+                    topic_off(document.getElementById(old_topic));
+                }
+                // make sure topic input box value and fragment reflects clicked selection
+                document.getElementById(topicID).value = vis_state.topic = d.topics;
+                state_save(true);
+                topic_on(this);
+            })
+            .on("mouseout", function(d) {
+                if (vis_state.topic != d.topics) topic_off(this);
+                if (vis_state.topic > 0) topic_on(document.getElementById(topicID + vis_state.topic));
+            });
+
+        svg.append("text")
+            .text("Intertopic Distance Map (via multidimensional scaling)")
+            .attr("x", mdswidth/2 + margin.left)
+            .attr("y", 30)
+            .style("font-size", "16px")
+            .style("text-anchor", "middle");
+
+        // establish layout and vars for bar chart
+        var barDefault2 = dat3.filter(function(d) {
+            return d.Category == "Default";
+        });
+
+        var y = d3.scale.ordinal()
+                .domain(barDefault2.map(function(d) {
+                    return d.Term;
+                }))
+                .rangeRoundBands([0, barheight], 0.15);
+        var x = d3.scale.linear()
+                .domain([1, d3.max(barDefault2, function(d) {
+                    return d.Total;
+                })])
+                .range([0, barwidth])
+                .nice();
+        var yAxis = d3.svg.axis()
+                .scale(y);
+
+        // Add a group for the bar chart
+        var chart = svg.append("g")
+                .attr("transform", "translate(" + +(mdswidth + margin.left + termwidth) + "," + 2 * margin.top + ")")
+                .attr("id", barFreqsID);
+
+        // bar chart legend/guide:
+        var barguide = {"width": 100, "height": 15};
+        d3.select("#" + barFreqsID).append("rect")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10)
+            .attr("height", barguide.height)
+            .attr("width", barguide.width)
+            .style("fill", color1)
+            .attr("opacity", 0.4);
+        d3.select("#" + barFreqsID).append("text")
+            .attr("x", barguide.width + 5)
+            .attr("y", mdsheight + 10 + barguide.height/2)
+            .style("dominant-baseline", "middle")
+            .text("Overall term frequency");
+
+        d3.select("#" + barFreqsID).append("rect")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + barguide.height + 5)
+            .attr("height", barguide.height)
+            .attr("width", barguide.width/2)
+            .style("fill", color2)
+            .attr("opacity", 0.8);
+        d3.select("#" + barFreqsID).append("text")
+            .attr("x", barguide.width/2 + 5)
+            .attr("y", mdsheight + 10 + (3/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("Estimated term frequency within the selected topic");
+
+        // footnotes:
+        d3.select("#" + barFreqsID)
+            .append("a")
+            .attr("xlink:href", "http://vis.stanford.edu/files/2012-Termite-AVI.pdf")
+            .attr("target", "_blank")
+            .append("text")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + (6/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("1. saliency(term w) = frequency(w) * [sum_t p(t | w) * log(p(t | w)/p(t))] for topics t; ");
+        d3.select("#" + barFreqsID)
+            .append("a")
+            .attr("xlink:href", "http://nlp.stanford.edu/events/illvi2014/papers/sievert-illvi2014.pdf")
+            .attr("target", "_blank")
+            .append("text")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + (8/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("2. relevance(term w | topic t) = λ * p(w | t) + (1 - λ) * p(w | t)/p(w); ");
+
+        // Bind 'default' data to 'default' bar chart
+        var basebars = chart.selectAll(to_select + " .bar-totals")
+                .data(barDefault2)
+                .enter();
+
+        // Draw the gray background bars defining the overall frequency of each word
+        basebars
+            .append("rect")
+            .attr("class", "bar-totals")
+            .attr("x", 0)
+            .attr("y", function(d) {
+                return y(d.Term);
+            })
+            .attr("height", y.rangeBand())
+            .attr("width", function(d) {
+                return x(d.Total);
+            })
+            .style("fill", color1)
+            .attr("opacity", 0.4);
+
+        // Add word labels to the side of each bar
+        basebars
+            .append("text")
+            .attr("x", -5)
+            .attr("class", "terms")
+            .attr("y", function(d) {
+                return y(d.Term) + 12;
+            })
+            .attr("cursor", "pointer")
+            .attr("id", function(d) {
+                return (termID + d.Term);
+            })
+            .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+            .text(function(d) {
+                return d.Term;
+            })
+            .on("mouseover", function() {
+                term_hover(this);
+            })
+        // .on("click", function(d) {
+        //     var old_term = termID + vis_state.term;
+        //     if (vis_state.term != "" && old_term != this.id) {
+        //         term_off(document.getElementById(old_term));
+        //     }
+        //     vis_state.term = d.Term;
+        //     state_save(true);
+        //     term_on(this);
+        //     debugger;
+        // })
+            .on("mouseout", function() {
+                vis_state.term = "";
+                term_off(this);
+                state_save(true);
+            });
+
+        var title = chart.append("text")
+                .attr("x", barwidth/2)
+                .attr("y", -30)
+                .attr("class", "bubble-tool") //  set class so we can remove it when highlight_off is called
+                .style("text-anchor", "middle")
+                .style("font-size", "16px")
+                .text("Top-" + R + " Most Salient Terms");
+
+        title.append("tspan")
+            .attr("baseline-shift", "super")
+            .attr("font-size", "12px")
+            .text("(1)");
+
+        // barchart axis adapted from http://bl.ocks.org/mbostock/1166403
+        var xAxis = d3.svg.axis().scale(x)
+                .orient("top")
+                .tickSize(-barheight)
+                .tickSubdivide(true)
+                .ticks(6);
+
+        chart.attr("class", "xaxis")
+            .call(xAxis);
+
+        // dynamically create the topic and lambda input forms at the top of the page:
+        function init_forms(topicID, lambdaID, visID) {
+
+            // create container div for topic and lambda input:
+            var inputDiv = document.createElement("div");
+            inputDiv.setAttribute("id", topID);
+            inputDiv.setAttribute("style", "width: 1210px"); // to match the width of the main svg element
+            document.getElementById(visID).appendChild(inputDiv);
+
+            // topic input container:
+            var topicDiv = document.createElement("div");
+            topicDiv.setAttribute("style", "padding: 5px; background-color: #e8e8e8; display: inline-block; width: " + mdswidth + "px; height: 50px; float: left");
+            inputDiv.appendChild(topicDiv);
+
+            var topicLabel = document.createElement("label");
+            topicLabel.setAttribute("for", topicID);
+            topicLabel.setAttribute("style", "font-family: sans-serif; font-size: 14px");
+            topicLabel.innerHTML = "Selected Topic: <span id='" + topicID + "-value'></span>";
+            topicDiv.appendChild(topicLabel);
+
+            var topicInput = document.createElement("input");
+            topicInput.setAttribute("style", "width: 50px");
+            topicInput.type = "text";
+            topicInput.min = "0";
+            topicInput.max = K; // assumes the data has already been read in
+            topicInput.step = "1";
+            topicInput.value = "0"; // a value of 0 indicates no topic is selected
+            topicInput.id = topicID;
+            topicDiv.appendChild(topicInput);
+
+            var previous = document.createElement("button");
+            previous.setAttribute("id", topicDown);
+            previous.setAttribute("style", "margin-left: 5px");
+            previous.innerHTML = "Previous Topic";
+            topicDiv.appendChild(previous);
+
+            var next = document.createElement("button");
+            next.setAttribute("id", topicUp);
+            next.setAttribute("style", "margin-left: 5px");
+            next.innerHTML = "Next Topic";
+            topicDiv.appendChild(next);
+
+            var clear = document.createElement("button");
+            clear.setAttribute("id", topicClear);
+            clear.setAttribute("style", "margin-left: 5px");
+            clear.innerHTML = "Clear Topic";
+            topicDiv.appendChild(clear);
+
+            // lambda inputs
+            //var lambdaDivLeft = 8 + mdswidth + margin.left + termwidth;
+            var lambdaDivWidth = barwidth;
+            var lambdaDiv = document.createElement("div");
+            lambdaDiv.setAttribute("id", lambdaInputID);
+            lambdaDiv.setAttribute("style", "padding: 5px; background-color: #e8e8e8; display: inline-block; height: 50px; width: " + lambdaDivWidth + "px; float: right; margin-right: 30px");
+            inputDiv.appendChild(lambdaDiv);
+
+            var lambdaZero = document.createElement("div");
+            lambdaZero.setAttribute("style", "padding: 5px; height: 20px; width: 220px; font-family: sans-serif; float: left");
+            lambdaZero.setAttribute("id", lambdaZeroID);
+            lambdaDiv.appendChild(lambdaZero);
+            var xx = d3.select("#" + lambdaZeroID)
+                    .append("text")
+                    .attr("x", 0)
+                    .attr("y", 0)
+                    .style("font-size", "14px")
+                    .text("Slide to adjust relevance metric:");
+            var yy = d3.select("#" + lambdaZeroID)
+                    .append("text")
+                    .attr("x", 125)
+                    .attr("y", -5)
+                    .style("font-size", "10px")
+                    .style("position", "absolute")
+                    .text("(2)");
+
+            var sliderDiv = document.createElement("div");
+            sliderDiv.setAttribute("id", sliderDivID);
+            sliderDiv.setAttribute("style", "padding: 5px; height: 40px; width: 250px; float: right; margin-top: -5px; margin-right: 10px");
+            lambdaDiv.appendChild(sliderDiv);
+
+            var lambdaInput = document.createElement("input");
+            lambdaInput.setAttribute("style", "width: 250px; margin-left: 0px; margin-right: 0px");
+            lambdaInput.type = "range";
+            lambdaInput.min = 0;
+            lambdaInput.max = 1;
+            lambdaInput.step = data['lambda.step'];
+            lambdaInput.value = vis_state.lambda;
+            lambdaInput.id = lambdaID;
+            lambdaInput.setAttribute("list", "ticks"); // to enable automatic ticks (with no labels, see below)
+            sliderDiv.appendChild(lambdaInput);
+
+            var lambdaLabel = document.createElement("label");
+            lambdaLabel.setAttribute("id", lambdaLabelID);
+            lambdaLabel.setAttribute("for", lambdaID);
+            lambdaLabel.setAttribute("style", "height: 20px; width: 60px; font-family: sans-serif; font-size: 14px; margin-left: 80px");
+            lambdaLabel.innerHTML = "&#955 = <span id='" + lambdaID + "-value'>" + vis_state.lambda + "</span>";
+            lambdaDiv.appendChild(lambdaLabel);
+
+            // Create the svg to contain the slider scale:
+            var scaleContainer = d3.select("#" + sliderDivID).append("svg")
+                    .attr("width", 250)
+                    .attr("height", 25);
+
+            var sliderScale = d3.scale.linear()
+                    .domain([0, 1])
+                    .range([7.5, 242.5])  // trimmed by 7.5px on each side to match the input type=range slider:
+                    .nice();
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var sliderAxis = d3.svg.axis()
+                    .scale(sliderScale)
+                    .orient("bottom")
+                    .tickSize(10)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // group to contain the elements of the slider axis:
+            var sliderAxisGroup = scaleContainer.append("g")
+                    .attr("class", "slideraxis")
+                    .attr("margin-top", "-10px")
+                    .call(sliderAxis);
+
+            // Another strategy for tick marks on the slider; simpler, but not labels
+            // var sliderTicks = document.createElement("datalist");
+            // sliderTicks.setAttribute("id", "ticks");
+            // for (var tick = 0; tick <= 10; tick++) {
+            //     var tickOption = document.createElement("option");
+            //     //tickOption.value = tick/10;
+            //     tickOption.innerHTML = tick/10;
+            //     sliderTicks.appendChild(tickOption);
+            // }
+            // append the forms to the containers
+            //lambdaDiv.appendChild(sliderTicks);
+
+        }
+
+        // function to re-order the bars (gray and red), and terms:
+        function reorder_bars(increase) {
+            // grab the bar-chart data for this topic only:
+            var dat2 = lamData.filter(function(d) {
+                //return d.Category == "Topic" + Math.min(K, Math.max(0, vis_state.topic)) // fails for negative topic numbers...
+                return d.Category == "Topic" + vis_state.topic;
+            });
+            // define relevance:
+            for (var i = 0; i < dat2.length; i++) {
+                dat2[i].relevance = vis_state.lambda * dat2[i].logprob +
+                    (1 - vis_state.lambda) * dat2[i].loglift;
+            }
+
+            // sort by relevance:
+            dat2.sort(fancysort("relevance"));
+
+            // truncate to the top R tokens:
+            var dat3 = dat2.slice(0, R);
+
+            var y = d3.scale.ordinal()
+                    .domain(dat3.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat3, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // Change Total Frequency bars
+            var graybars = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .bar-totals")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // Change word labels
+            var labels = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .terms")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // Create red bars (drawn over the gray ones) to signify the frequency under the selected topic
+            var redbars = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .overlay")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // New axis definition:
+            var newaxis = d3.selectAll(to_select + " .xaxis");
+
+            // define the new elements to enter:
+            var graybarsEnter = graybars.enter().append("rect")
+                    .attr("class", "bar-totals")
+                    .attr("x", 0)
+                    .attr("y", function(d) {
+                        return y(d.Term) + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("height", y.rangeBand())
+                    .style("fill", color1)
+                    .attr("opacity", 0.4);
+
+            var labelsEnter = labels.enter()
+                    .append("text")
+                    .attr("x", -5)
+                    .attr("class", "terms")
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12 + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("cursor", "pointer")
+                    .style("text-anchor", "end")
+                    .attr("id", function(d) {
+                        return (termID + d.Term);
+                    })
+                    .text(function(d) {
+                        return d.Term;
+                    })
+                    .on("mouseover", function() {
+                        term_hover(this);
+                    })
+            // .on("click", function(d) {
+            //     var old_term = termID + vis_state.term;
+            //     if (vis_state.term != "" && old_term != this.id) {
+            //     term_off(document.getElementById(old_term));
+            //     }
+            //     vis_state.term = d.Term;
+            //     state_save(true);
+            //     term_on(this);
+            // })
+                    .on("mouseout", function() {
+                        vis_state.term = "";
+                        term_off(this);
+                        state_save(true);
+                    });
+
+            var redbarsEnter = redbars.enter().append("rect")
+                    .attr("class", "overlay")
+                    .attr("x", 0)
+                    .attr("y", function(d) {
+                        return y(d.Term) + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("height", y.rangeBand())
+                    .style("fill", color2)
+                    .attr("opacity", 0.8);
+
+
+            if (increase) {
+                graybarsEnter
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+                labelsEnter
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbarsEnter
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+
+                graybars.transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+                labels.transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbars.transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+
+                // Transition exiting rectangles to the bottom of the barchart:
+                graybars.exit()
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18;
+                    })
+                    .remove();
+                labels.exit()
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 18 + i * 18;
+                    })
+                    .remove();
+                redbars.exit()
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18;
+                    })
+                    .remove();
+                // https://github.com/mbostock/d3/wiki/Transitions#wiki-d3_ease
+                newaxis.transition().duration(duration)
+                    .call(xAxis)
+                    .transition().duration(duration);
+            } else {
+                graybarsEnter
+                    .attr("width", 100) // FIXME by looking up old width of these bars
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    });
+                labelsEnter
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbarsEnter
+                    .attr("width", 50) // FIXME by looking up old width of these bars
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    });
+
+                graybars.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    });
+                labels.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbars.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    });
+
+                // Transition exiting rectangles to the bottom of the barchart:
+                graybars.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+                labels.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 18 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+                redbars.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+
+                // https://github.com/mbostock/d3/wiki/Transitions#wiki-d3_ease
+                newaxis.transition().duration(duration)
+                    .transition().duration(duration)
+                    .call(xAxis);
+            }
+        }
+
+        //////////////////////////////////////////////////////////////////////////////
+
+        // function to update bar chart when a topic is selected
+        // the circle argument should be the appropriate circle element
+        function topic_on(circle) {
+            if (circle == null) return null;
+
+            // grab data bound to this element
+            var d = circle.__data__;
+            var Freq = Math.round(d.Freq * 10) / 10,
+                topics = d.topics;
+
+            // change opacity and fill of the selected circle
+            circle.style.opacity = highlight_opacity;
+            circle.style.fill = color2;
+
+            // Remove 'old' bar chart title
+            var text = d3.select(to_select + " .bubble-tool");
+            text.remove();
+
+            // append text with info relevant to topic of interest
+            d3.select("#" + barFreqsID)
+                .append("text")
+                .attr("x", barwidth/2)
+                .attr("y", -30)
+                .attr("class", "bubble-tool") //  set class so we can remove it when highlight_off is called
+                .style("text-anchor", "middle")
+                .style("font-size", "16px")
+                .text("Top-" + R + " Most Relevant Terms for Topic " + topics + " (" + Freq + "% of tokens)");
+
+            // grab the bar-chart data for this topic only:
+            var dat2 = lamData.filter(function(d) {
+                return d.Category == "Topic" + topics;
+            });
+
+            // define relevance:
+            for (var i = 0; i < dat2.length; i++) {
+                dat2[i].relevance = lambda.current * dat2[i].logprob +
+                    (1 - lambda.current) * dat2[i].loglift;
+            }
+
+            // sort by relevance:
+            dat2.sort(fancysort("relevance"));
+
+            // truncate to the top R tokens:
+            var dat3 = dat2.slice(0, R);
+
+            // scale the bars to the top R terms:
+            var y = d3.scale.ordinal()
+                    .domain(dat3.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat3, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // remove the red bars if there are any:
+            d3.selectAll(to_select + " .overlay").remove();
+
+            // Change Total Frequency bars
+            d3.selectAll(to_select + " .bar-totals")
+                .data(dat3)
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Total);
+                })
+                .style("fill", color1)
+                .attr("opacity", 0.4);
+
+            // Change word labels
+            d3.selectAll(to_select + " .terms")
+                .data(dat3)
+                .attr("x", -5)
+                .attr("y", function(d) {
+                    return y(d.Term) + 12;
+                })
+                .attr("id", function(d) {
+                    return (termID + d.Term);
+                })
+                .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+                .text(function(d) {
+                    return d.Term;
+                });
+
+            // Create red bars (drawn over the gray ones) to signify the frequency under the selected topic
+            d3.select("#" + barFreqsID).selectAll(to_select + " .overlay")
+                .data(dat3)
+                .enter()
+                .append("rect")
+                .attr("class", "overlay")
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Freq);
+                })
+                .style("fill", color2)
+                .attr("opacity", 0.8);
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // redraw x-axis
+            d3.selectAll(to_select + " .xaxis")
+            //.attr("class", "xaxis")
+                .call(xAxis);
+        }
+
+
+        function topic_off(circle) {
+            if (circle == null) return circle;
+            // go back to original opacity/fill
+            circle.style.opacity = base_opacity;
+            circle.style.fill = color1;
+
+            var title = d3.selectAll(to_select + " .bubble-tool")
+                    .text("Top-" + R + " Most Salient Terms");
+            title.append("tspan")
+                .attr("baseline-shift", "super")
+                .attr("font-size", 12)
+                .text(1);
+
+            // remove the red bars
+            d3.selectAll(to_select + " .overlay").remove();
+
+            // go back to 'default' bar chart
+            var dat2 = lamData.filter(function(d) {
+                return d.Category == "Default";
+            });
+
+            var y = d3.scale.ordinal()
+                    .domain(dat2.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat2, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // Change Total Frequency bars
+            d3.selectAll(to_select + " .bar-totals")
+                .data(dat2)
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Total);
+                })
+                .style("fill", color1)
+                .attr("opacity", 0.4);
+
+            //Change word labels
+            d3.selectAll(to_select + " .terms")
+                .data(dat2)
+                .attr("x", -5)
+                .attr("y", function(d) {
+                    return y(d.Term) + 12;
+                })
+                .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+                .text(function(d) {
+                    return d.Term;
+                });
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // redraw x-axis
+            d3.selectAll(to_select + " .xaxis")
+                .attr("class", "xaxis")
+                .call(xAxis);
+        }
+
+        // event definition for mousing over a term
+        function term_hover(term) {
+            var old_term = termID + vis_state.term;
+            if (vis_state.term != "" && old_term != term.id) {
+                term_off(document.getElementById(old_term));
+            }
+            vis_state.term = term.innerHTML;
+            term_on(term);
+            state_save(true);
+        }
+        // updates vis when a term is selected via click or hover
+        function term_on(term) {
+            if (term == null) return null;
+            term.style["fontWeight"] = "bold";
+            var d = term.__data__;
+            var Term = d.Term;
+            var dat2 = mdsData3.filter(function(d2) {
+                return d2.Term == Term;
+            });
+
+            var k = dat2.length; // number of topics for this token with non-zero frequency
+
+            var radius = [];
+            for (var i = 0; i < K; ++i) {
+                radius[i] = 0;
+            }
+            for (i = 0; i < k; i++) {
+                radius[dat2[i].Topic - 1] = dat2[i].Freq;
+            }
+
+            var size = [];
+            for (var i = 0; i < K; ++i) {
+                size[i] = 0;
+            }
+            for (i = 0; i < k; i++) {
+                // If we want to also re-size the topic number labels, do it here
+                // 11 is the default, so leaving this as 11 won't change anything.
+                size[dat2[i].Topic - 1] = 11;
+            }
+
+            var rScaleCond = d3.scale.sqrt()
+                    .domain([0, 1]).range([0, rMax]);
+
+            // Change size of bubbles according to the word's distribution over topics
+            d3.selectAll(to_select + " .dot")
+                .data(radius)
+                .transition()
+                .attr("r", function(d) {
+                    //return (rScaleCond(d));
+                    return (Math.sqrt(d*mdswidth*mdsheight*word_prop/Math.PI));
+                });
+
+            // re-bind mdsData so we can handle multiple selection
+            d3.selectAll(to_select + " .dot")
+                .data(mdsData);
+
+            // Change sizes of topic numbers:
+            d3.selectAll(to_select + " .txt")
+                .data(size)
+                .transition()
+                .style("font-size", function(d) {
+                    return +d;
+                });
+
+            // Alter the guide
+            d3.select(to_select + " .circleGuideTitle")
+                .text("Conditional topic distribution given term = '" + term.innerHTML + "'");
+        }
+
+        function term_off(term) {
+            if (term == null) return null;
+            term.style["fontWeight"] = "normal";
+
+            d3.selectAll(to_select + " .dot")
+                .data(mdsData)
+                .transition()
+                .attr("r", function(d) {
+                    //return (rScaleMargin(+d.Freq));
+                    return (Math.sqrt((d.Freq/100)*mdswidth*mdsheight*circle_prop/Math.PI));
+                });
+
+            // Change sizes of topic numbers:
+            d3.selectAll(to_select + " .txt")
+                .transition()
+                .style("font-size", "12px");
+
+            // Go back to the default guide
+            d3.select(to_select + " .circleGuideTitle")
+                .text("Marginal topic distribution");
+            d3.select(to_select + " .circleGuideLabelLarge")
+                .text(defaultLabelLarge);
+            d3.select(to_select + " .circleGuideLabelSmall")
+                .attr("y", mdsheight + 2 * newSmall)
+                .text(defaultLabelSmall);
+            d3.select(to_select + " .circleGuideSmall")
+                .attr("r", newSmall)
+                .attr("cy", mdsheight + newSmall);
+            d3.select(to_select + " .lineGuideSmall")
+                .attr("y1", mdsheight + 2 * newSmall)
+                .attr("y2", mdsheight + 2 * newSmall);
+        }
+
+
+        // serialize the visualization state using fragment identifiers -- http://en.wikipedia.org/wiki/Fragment_identifier
+        // location.hash holds the address information
+
+        var params = location.hash.split("&");
+        if (params.length > 1) {
+            vis_state.topic = params[0].split("=")[1];
+            vis_state.lambda = params[1].split("=")[1];
+            vis_state.term = params[2].split("=")[1];
+
+            // Idea: write a function to parse the URL string
+            // only accept values in [0,1] for lambda, {0, 1, ..., K} for topics (any string is OK for term)
+            // Allow for subsets of the three to be entered:
+            // (1) topic only (lambda = 1 term = "")
+            // (2) lambda only (topic = 0 term = "") visually the same but upon hovering a topic, the effect of lambda will be seen
+            // (3) term only (topic = 0 lambda = 1) only fires when the term is among the R most salient
+            // (4) topic + lambda (term = "")
+            // (5) topic + term (lambda = 1)
+            // (6) lambda + term (topic = 0) visually lambda doesn't make a difference unless a topic is hovered
+            // (7) topic + lambda + term
+
+            // Short-term: assume format of "#topic=k&lambda=l&term=s" where k, l, and s are strings (b/c they're from a URL)
+
+            // Force k (topic identifier) to be an integer between 0 and K:
+            vis_state.topic = Math.round(Math.min(K, Math.max(0, vis_state.topic)));
+
+            // Force l (lambda identifier) to be in [0, 1]:
+            vis_state.lambda = Math.min(1, Math.max(0, vis_state.lambda));
+
+            // impose the value of lambda:
+            document.getElementById(lambdaID).value = vis_state.lambda;
+            document.getElementById(lambdaID + "-value").innerHTML = vis_state.lambda;
+
+            // select the topic and transition the order of the bars (if approporiate)
+            if (!isNaN(vis_state.topic)) {
+                document.getElementById(topicID).value = vis_state.topic;
+                if (vis_state.topic > 0) {
+                    topic_on(document.getElementById(topicID + vis_state.topic));
+                }
+                if (vis_state.lambda < 1 && vis_state.topic > 0) {
+                    reorder_bars(false);
+                }
+            }
+            lambda.current = vis_state.lambda;
+            var termElem = document.getElementById(termID + vis_state.term);
+            if (termElem !== undefined) term_on(termElem);
+        }
+
+        function state_url() {
+            return location.origin + location.pathname + "#topic=" + vis_state.topic +
+                "&lambda=" + vis_state.lambda + "&term=" + vis_state.term;
+        }
+
+        function state_save(replace) {
+            if (replace)
+                history.replaceState(vis_state, "Query", state_url());
+            else
+                history.pushState(vis_state, "Query", state_url());
+        }
+
+        function state_reset() {
+            if (vis_state.topic > 0) {
+                topic_off(document.getElementById(topicID + vis_state.topic));
+            }
+            if (vis_state.term != "") {
+                term_off(document.getElementById(termID + vis_state.term));
+            }
+            vis_state.term = "";
+            document.getElementById(topicID).value = vis_state.topic = 0;
+            state_save(true);
+        }
+
+    }
+
+    if (typeof data_or_file_name === 'string')
+        d3.json(data_or_file_name, function(error, data) {visualize(data);});
+    else
+        visualize(data_or_file_name);
+
+    // var current_clicked = {
+    //     what: "nothing",
+    //     element: undefined
+    // },
+
+    //debugger;
+
+};
+
+var ldavis_el1911771396656165339281508491739_data = {"mdsDat": {"Freq": [19.33718570487395, 10.923435161654895, 8.617495519551406, 6.988370263787296, 6.1872108218155475, 5.975813611917835, 5.729455969753031, 5.451499090713723, 5.348891741196661, 5.320285989583416, 5.1648933414396545, 4.787371189681614, 4.181180566650104, 3.5574098890664105, 2.4295011383144547], "cluster": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "topics": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "x": [257.8221435546875, -12.133940696716309, -359.42828369140625, 54.87605285644531, 143.3492889404297, -109.1241455078125, -383.9324645996094, 268.2145690917969, -174.8558349609375, 297.90423583984375, -273.7470703125, 51.60306930541992, -163.25819396972656, 44.8383674621582, 402.7306823730469], "y": [-453.50927734375, -463.47564697265625, -164.39553833007812, 361.4842834472656, -255.7994842529297, -235.17665100097656, 93.35964965820312, -16.482650756835938, 239.8599853515625, 214.86595153808594, -410.9191589355469, 130.39471435546875, -5.9358954429626465, -75.7318115234375, -203.7679443359375]}, "tinfo": {"Category": ["Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic11", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic12", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic13", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic14", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15", "Topic15"], "Freq": [1644.0, 1328.0, 2314.0, 1376.0, 1243.0, 1906.0, 737.0, 721.0, 1007.0, 815.0, 522.0, 460.0, 499.0, 610.0, 603.0, 334.0, 612.0, 614.0, 428.0, 451.0, 596.0, 246.0, 305.0, 240.0, 517.0, 295.0, 575.0, 663.0, 289.0, 444.0, 1375.3030878412435, 1242.3769186856284, 373.1406974428442, 367.0040001014854, 325.8044657998923, 314.5601302404125, 301.48715053830705, 296.7971195461902, 272.1380815630999, 258.6184131828489, 255.17719435939375, 254.40118440050463, 228.22701739610503, 209.41501866187062, 209.02962702517186, 204.94631051989958, 199.44605101099506, 181.25269911576765, 176.31516166863884, 172.9969447529071, 167.16216968882355, 166.01226560793327, 165.02352578391768, 164.1840060519116, 161.06755123773277, 157.8178807606598, 145.46851161530702, 142.39467644837976, 140.5651724786353, 136.33180959947282, 206.98613806900164, 425.2449748201087, 286.74260038279107, 229.63895997320913, 183.29589894225208, 330.158402687447, 816.7155601095773, 350.59987626668, 264.0624651384214, 387.5334472569434, 237.78989777260298, 326.58131440713885, 232.72919285935922, 609.7467176050924, 228.6529264912824, 221.74257445832805, 228.07945011323784, 214.32442527128586, 450.86830659511736, 332.57653559239543, 289.32099303820854, 207.4260591027672, 175.80079097734108, 169.380726555953, 134.69061468751397, 133.1594526258464, 118.40260215219908, 98.3465080629901, 86.41661028298253, 83.44152558904942, 82.46513371152272, 76.40960427578347, 73.65957175578012, 73.64662468287959, 73.12013320536612, 71.5019156248981, 67.62917347409868, 63.78218624164151, 60.056080401867355, 59.922642759728305, 58.18126256214444, 58.13720303999608, 58.09685678332638, 58.054420134408446, 57.913025323500136, 51.340092170579865, 50.78093007857177, 50.62645021978577, 584.1137064894982, 352.7560136196333, 143.29543605854377, 132.64781333599842, 273.0534838388629, 211.20022815701137, 116.85991993244714, 364.04263895168623, 760.2880421996781, 117.20870603497146, 856.6362288230564, 191.5261062336988, 197.43789969286348, 152.64113221157263, 143.17712960781455, 134.17665055423853, 275.3580365474094, 162.8610944999398, 162.43868056591631, 133.96469547267174, 143.85189684070096, 130.86966304147822, 172.66190030006362, 173.21296131224824, 142.7227254630941, 1643.752431241016, 197.48925180511245, 115.69121486872564, 114.31413366184594, 112.2286151150804, 103.80518738115394, 83.19874458203395, 77.55391415181192, 74.84673734663687, 70.18179733895606, 69.21654442089435, 65.9302724815923, 63.58905897679022, 62.383465171065, 56.52917873109792, 56.43305565209117, 54.978175268490546, 53.67001446497038, 53.55799246881178, 49.37687064697465, 48.98019673983027, 48.52593205334266, 46.14114505409338, 46.03478670462816, 45.60916312950727, 42.63634636243727, 40.70670519521316, 39.77618311422051, 38.69393092624678, 38.46388961160232, 105.81894135930806, 161.0153453691332, 623.0712339857265, 159.1802219776295, 121.99511075633731, 209.55677708663788, 112.92023994038342, 348.84661415617944, 142.85838638580705, 479.2624478050517, 184.22095300698282, 86.58224360546289, 231.8332195047695, 71.80913458239634, 91.19547375196623, 121.80784086823975, 222.17285243842784, 130.2716164908035, 117.83978703273502, 125.4050947332649, 87.03216686046652, 97.01106047199988, 77.24279061201709, 78.22222020202305, 498.2396551057976, 189.4375160130344, 178.31642476933027, 145.9451605352695, 117.25399832241834, 115.8533156900329, 100.04233234347869, 94.51170737619563, 93.82758955322427, 86.8476466688138, 82.27838812329514, 78.76107920092228, 76.85861413592664, 76.1242275065724, 72.90422106872873, 71.4218911714114, 66.32619124984997, 64.68345790328672, 63.205153672838016, 61.47591536244648, 59.20116621413016, 59.070567918057925, 59.02829738180784, 57.96381055429125, 57.29238091352169, 57.189508472728434, 56.914468740747935, 56.100769497772795, 53.33259545348978, 53.19190265801569, 105.33047441741198, 211.05653279958256, 107.23476012953515, 83.3399743994702, 96.98632344546917, 164.70160149124743, 74.21765265634332, 98.04212557148844, 99.72136488589533, 68.97771717490356, 93.01371212656456, 88.73882655988652, 75.57804490815828, 86.1230609107271, 108.89422169811968, 104.02860330520001, 82.82441175973526, 80.49625424986051, 77.21170456880341, 171.58068654541526, 135.74907952238615, 119.84528866666824, 105.75420087961193, 100.80865172346665, 66.02506173535836, 65.99956083496681, 62.26010401839611, 56.49904678791085, 54.56192085714796, 53.633114494155414, 52.512129484236404, 50.87721585683351, 48.137737179721995, 46.67392346664014, 44.92565210086959, 44.848426823600676, 43.77882646667106, 42.3262520153857, 41.563924406563466, 39.5144295720401, 36.61406591016738, 36.45850529177294, 36.10846283123325, 32.49199596126403, 32.2962044578337, 32.248529587595655, 32.14868221674334, 30.463021947322382, 30.265139740425624, 1287.7354446578615, 111.76949189494519, 150.38269289538147, 269.0044553162607, 593.8727455996197, 246.48057980902917, 64.35921785455567, 114.02068978736388, 115.41961616442175, 127.10566350792145, 191.6947416693066, 138.34749923481698, 120.91949223722469, 145.25145573153688, 178.18956518291031, 144.87636082871646, 108.35980709463341, 107.85904269354972, 84.17529344957558, 74.17495747392967, 85.53273943355373, 82.69892689048123, 79.35760809229448, 78.7985202086103, 70.04034389496469, 288.4356149330465, 135.96959231185014, 117.52103317480346, 70.69691512876958, 66.98507003635278, 61.24340190235831, 52.13941201092341, 48.31525635515734, 47.81754228379909, 45.76377295617511, 43.75349454971496, 42.49464226103697, 41.96101419235289, 41.711565571451445, 41.15192967662069, 40.761386216928265, 40.07206135236787, 39.35806123720112, 39.31817248377415, 37.44568144824788, 35.67916015970843, 34.05470152082037, 33.568231040817295, 33.48991635452933, 33.139298335826005, 33.01113865416194, 32.90729893741452, 32.4833358314324, 32.40603191361927, 31.20688437107199, 595.6041660401339, 248.38300327984288, 78.57863349870507, 88.89095353057755, 130.44404651841288, 162.95179412004592, 54.21189873028194, 154.69962154664077, 89.44111175286824, 344.34495621779223, 198.2507702838018, 83.16622236046597, 847.1327424362793, 110.83609122369914, 122.39978210258025, 237.48284096565683, 104.21433246294916, 212.51935672336484, 64.24467490720279, 85.97060730765523, 79.766109869719, 77.7671624523413, 73.62204201176957, 70.50717273937063, 71.80449832204751, 73.05513264716882, 67.46692288188194, 222.09945887341684, 164.35482640276265, 126.60779803929452, 114.39408574517714, 107.84417336257403, 105.11106387923279, 99.59150478844386, 86.4421360579495, 82.2302792539816, 76.45143870741832, 75.45388357160128, 70.82759247667616, 70.55359921186962, 69.12150003094425, 63.34766260374355, 58.742537739233526, 58.54635222536218, 55.62545071020732, 47.590114667492614, 47.38236951192071, 43.75420131663687, 41.03875526836548, 38.97672416676702, 36.236799417261096, 35.98014145475388, 35.19062675458714, 34.97305621074151, 33.21403217056298, 32.111266348331775, 31.425194719460357, 108.39298951452541, 83.58707776200293, 104.9980460045391, 103.7136334439211, 191.57044771343914, 72.26571439898743, 159.87133627738837, 136.5767446172737, 80.44264034604358, 178.94050086023768, 121.70867389028324, 73.2398138301684, 72.71716236341175, 88.99390477876423, 294.1675499927668, 162.7912849142952, 113.98695880661994, 112.00290070902813, 87.91201498646127, 86.948580433172, 82.07689426394391, 70.67482354738762, 68.7165873360226, 62.43297158536078, 60.56780978616068, 59.321923470668736, 53.293469326880334, 50.757981968134956, 50.517150677943384, 50.29228873455286, 512.004322029716, 45.707501687874945, 45.36130549560362, 44.04625954616431, 43.866313649875146, 39.435746477472975, 38.58644956263468, 37.55141455634497, 34.04964757657314, 33.705542055747514, 33.172457999223084, 32.7275313520812, 31.379153307147142, 31.311465505392466, 223.2947715421549, 62.58354979997151, 121.29328565469832, 179.0723226246253, 165.12212653310402, 241.68303840264844, 314.5021129958746, 102.28616784580802, 105.32982894101214, 93.22482670874395, 94.44684423529422, 148.19270836662943, 50.57710021066717, 85.88931097558567, 70.33195059104985, 67.57994045645327, 62.33165149351988, 60.506503150896926, 459.8849955886296, 212.2415651230206, 154.79918659135882, 115.96551281654529, 111.2240909723625, 84.56188500573461, 60.12504684705434, 57.90440123928782, 57.720138992639015, 55.1384748749426, 52.28839439008264, 50.01875038907732, 46.200934507545185, 44.61920265419364, 43.76178272740301, 40.11935034489972, 38.584560219853664, 37.38902696496309, 36.709410107387306, 36.60365025253289, 36.53144879922332, 33.48384059105479, 32.49573774427261, 31.934961124506934, 31.437547799847096, 31.234691011136626, 30.656424113495376, 27.977607558322784, 27.90470302608618, 27.69192410453861, 52.12156662957793, 189.15036955168094, 303.5298689201432, 202.25349109286847, 148.51660855104518, 56.028016225378764, 52.92933767947957, 121.5719330916995, 80.04358066190777, 101.56108613292116, 69.90004224891949, 63.02765717795891, 59.99438411342901, 51.96919398972499, 100.03073975617771, 58.979744441621904, 80.92128870635302, 72.05909239010167, 70.48772852165922, 65.31521855409392, 74.66662658692239, 58.68247010074566, 56.51538999873904, 56.02870832699656, 201.10577786302028, 199.5384689434108, 162.15790415807413, 121.61184471549305, 117.53150074431552, 81.62802253841751, 81.54003045808196, 81.15836986772804, 76.66508692088446, 73.1599774178546, 67.64575365971089, 63.2272725898235, 59.66341317892734, 58.52979982310568, 58.41669176846698, 55.3272167340875, 51.86824518688743, 51.06650388899281, 45.33479287188107, 45.22862465073138, 43.29952366392071, 42.70136972199642, 41.11309760260304, 41.01418570325771, 40.90273856195531, 40.68636156183296, 40.504287360306705, 39.52471145245275, 38.9339551043783, 38.91503669073399, 110.8460607300629, 80.25163713894507, 77.55676764528222, 91.75673476141885, 95.92968527882583, 132.80177708081547, 54.80059122209507, 65.44024636532824, 101.0460058006885, 120.02885927385982, 74.18843526717492, 50.10140313272118, 54.67568368900369, 53.14259002559477, 304.2803362522049, 194.58630130322115, 183.46141637200768, 99.10314217494302, 91.60745209009175, 90.6082444255253, 72.53638404001192, 71.08075562419094, 65.90806628139786, 52.07821271609292, 51.75342879679498, 51.655554366076586, 48.93253595127022, 48.524702501275705, 48.29901310125348, 45.33901309696906, 44.77862334999478, 43.777522363989675, 43.59832745414558, 43.56186741805261, 42.695979298555756, 41.73882407544363, 40.277860024781035, 38.4876672604858, 37.870694244811425, 36.86797186202442, 35.557121075151365, 35.07550459649064, 34.63897910921522, 33.76838716103911, 192.58201365017638, 235.96723764085212, 250.24315513029825, 103.6944789489454, 116.61958105953019, 65.2008300718374, 129.28740206690512, 59.73848068105029, 129.8854311377943, 104.74466157269265, 72.92070021754276, 68.92359296849877, 91.25509717935914, 87.5423774939296, 107.11400648489872, 64.70346793956642, 50.781319732063004, 54.458826886520896, 52.107346839230416, 160.5428598332591, 141.81228597492702, 131.30063500386996, 122.15413373301173, 116.66977065414284, 110.82951262322453, 99.42444119421552, 70.0011458234918, 66.76114203473877, 61.112926000910505, 59.38738631385446, 55.46571993164364, 53.795175253670266, 52.10827095370741, 51.75550059284988, 50.889560641908, 49.06792522873369, 46.4543988863233, 43.88071223854844, 41.578036112071345, 41.23682450181716, 40.38900143290656, 40.27438391895824, 38.694744683388166, 37.74513735231075, 36.01051059135151, 35.65704243437818, 34.68186020615887, 34.10200837612234, 33.86715979882202, 199.13530360535853, 223.5948988936327, 96.6664340453973, 56.69919522346719, 72.23506499598861, 84.57146186568036, 205.19688563951144, 55.86441942220627, 67.97982381528949, 48.492051508062836, 64.38953146270572, 58.42836860381388, 52.37066766352606, 333.52366166979004, 200.9911441365593, 129.938649409626, 112.45446516672585, 108.71513895123421, 94.44271327050683, 78.68892904670584, 68.85894334897725, 68.2087464566086, 67.09465739632084, 65.43233496800981, 65.29552798726017, 62.49488234510565, 57.105150861022494, 53.181981575797415, 50.323508511521375, 49.91262399823098, 44.170032966652485, 41.57200114881218, 40.10563080848446, 40.09357653782909, 38.52850663696305, 37.921578836145734, 37.06349193101468, 36.098367665712324, 35.754723319898154, 35.41514829907071, 35.04616384302747, 33.22538691184216, 32.84622136273075, 92.6182038748512, 54.75393323167116, 94.93629820317383, 42.34230803076818, 113.72536895793107, 60.250144554155995, 57.42268138898355, 55.73529787736321, 42.56953078542782, 51.906711364135965, 42.438823105330435, 237.42221436200052, 141.70584632331813, 127.63696816087311, 106.5101102024269, 86.77925235368708, 81.2072638859678, 78.1670478428842, 77.59128337986198, 72.68785133889419, 70.38946252006778, 67.33433957014832, 66.51066378166549, 62.215155972473276, 58.434679716567864, 58.05299334524173, 57.39966962996433, 57.07248771356818, 56.68747884718247, 53.56741608786179, 49.504930806897285, 47.06228616595778, 46.76938804074996, 45.94600314100344, 44.95379971921931, 41.67314163642693, 39.759866297777144, 35.987366040177534, 35.10452587542759, 33.54239817986564, 32.448516074565525, 41.51346742998851, 104.75234591210189, 113.60174373971199, 49.615885851852816, 40.10597854721993, 245.33232659643153, 240.01660557500455, 90.99839338752643, 88.49171867167288, 80.35805723527115, 65.33670991532973, 58.18624025913954, 56.3975819993369, 52.28490270570096, 51.258895701885045, 47.58986950102292, 45.96996231319011, 34.41340780598335, 34.10668717298945, 33.868334116501, 31.843317986283047, 30.76522261386327, 29.57663181715231, 29.31462144046029, 29.237341002962683, 28.590231014288772, 28.07184426627249, 27.58018763051254, 27.252198407266, 27.09033581543092, 26.95356579435661, 26.16197635722935, 25.463733847831232, 25.349415061302928, 24.776977746311182, 45.8773915712264, 59.27984369231811, 74.56441967241136, 47.474070878212906, 31.00316926563982, 32.02344460537211], "Term": ["company", "bank", "percent", "billion", "market", "year", "government", "sale", "share", "million", "stock", "china", "deal", "economy", "investor", "oil", "price", "analyst", "country", "rate", "quarter", "boeing", "offer", "order", "group", "yen", "business", "month", "consumer", "growth", "billion", "market", "loan", "report", "investment", "asset", "statement", "loss", "march", "result", "security", "monday", "january", "sector", "major", "support", "close", "current", "largest", "mortgage", "large", "record", "february", "sign", "credit", "told", "chairman", "put", "show", "system", "biggest", "week", "debt", "set", "bond", "reuters", "year", "expected", "friday", "month", "end", "time", "based", "percent", "financial", "fund", "analyst", "cost", "rate", "fed", "rise", "inflation", "worker", "decline", "economist", "recession", "export", "pace", "worry", "survey", "inventory", "worst", "trend", "warned", "output", "employment", "sharply", "highest", "slow", "fresh", "slowdown", "unemployment", "sharp", "improvement", "peak", "manufacturer", "huge", "gdp", "economy", "growth", "recovery", "rising", "cut", "demand", "supply", "quarter", "year", "recent", "percent", "data", "higher", "level", "low", "lower", "month", "increase", "job", "fall", "economic", "hit", "expected", "price", "government", "company", "google", "technology", "apple", "post", "cent", "phone", "rating", "dell", "software", "battery", "device", "digital", "internet", "named", "founder", "coal", "expense", "computer", "insurer", "video", "metal", "list", "search", "advertising", "glencore", "online", "restaurant", "plc", "cerberus", "network", "charge", "million", "ceo", "citigroup", "revenue", "customer", "business", "buy", "share", "corp", "officer", "quarter", "working", "contract", "source", "year", "time", "plan", "sale", "exchange", "including", "run", "top", "deal", "executive", "tax", "court", "interest", "question", "authority", "newspaper", "medium", "seeking", "project", "paper", "similar", "fee", "bankruptcy", "legal", "hour", "chicago", "owner", "pension", "labor", "signed", "act", "trust", "spokeswoman", "owns", "income", "patent", "kind", "letter", "compensation", "pay", "call", "ubs", "spokesman", "people", "filed", "employee", "agreement", "filing", "face", "operation", "access", "comment", "state", "reuters", "case", "tuesday", "based", "treasury", "obama", "condition", "aid", "bernanke", "release", "regulatory", "discussion", "irish", "summer", "flight", "derivative", "deposit", "progress", "test", "attempt", "adviser", "requirement", "required", "taxpayer", "way", "guarantee", "completed", "scheduled", "basel", "remark", "discus", "libor", "hughes", "momentum", "bank", "asked", "regulator", "official", "government", "capital", "client", "rule", "public", "meeting", "financial", "source", "talk", "state", "plan", "fund", "economic", "program", "problem", "step", "made", "part", "friday", "thursday", "editing", "consumer", "store", "retailer", "lowest", "chain", "slightly", "holiday", "response", "noted", "flat", "underlying", "versus", "excluding", "bit", "reading", "payroll", "household", "discount", "jersey", "school", "save", "mastercard", "cautious", "weather", "shopper", "card", "solid", "shipment", "initially", "referring", "sale", "profit", "net", "posted", "outlook", "earnings", "item", "gain", "retail", "price", "forecast", "helped", "percent", "expectation", "reported", "analyst", "average", "share", "weak", "strong", "home", "november", "fall", "spending", "good", "increase", "rose", "trade", "sec", "commodity", "madoff", "investigation", "goldman", "lawsuit", "congress", "found", "fraud", "lawmaker", "probe", "complaint", "practice", "robert", "hearing", "rescue", "accounting", "initial", "secretary", "massive", "scandal", "hiring", "alleged", "bringing", "criminal", "effectively", "employer", "defendant", "moody", "claim", "lawyer", "agency", "commission", "case", "trader", "firm", "york", "led", "investor", "day", "federal", "action", "week", "yen", "equity", "nasdaq", "japanese", "property", "performance", "closed", "dow", "boston", "canada", "rally", "tokyo", "negative", "commercial", "rim", "session", "stock", "boosted", "jpmorgan", "weaker", "weekly", "borrower", "volatility", "motorola", "prompted", "break", "component", "nokia", "jones", "asian", "japan", "brokerage", "news", "trading", "index", "investor", "share", "exchange", "move", "average", "future", "analyst", "dropped", "high", "sell", "profit", "euro", "home", "china", "currency", "chinese", "german", "ecb", "australia", "steel", "italy", "beijing", "india", "hungary", "australian", "italian", "subsidy", "yuan", "social", "fundamental", "player", "import", "weekend", "paris", "heavily", "decide", "mining", "separately", "gmt", "partly", "scale", "rapidly", "stephen", "duty", "european", "country", "dollar", "euro", "exposure", "asia", "europe", "french", "head", "development", "writing", "main", "germany", "risk", "foreign", "future", "concern", "measure", "people", "price", "long", "potential", "position", "policy", "crisis", "imf", "reform", "payment", "ireland", "limit", "saturday", "aig", "interview", "judge", "trial", "saving", "collapse", "deficit", "greece", "appeal", "minute", "summit", "parliament", "count", "stability", "scheme", "tightening", "creditor", "buffett", "monetary", "keeping", "senate", "successful", "package", "return", "chief", "don", "announced", "world", "bad", "banking", "make", "time", "decision", "force", "needed", "work", "offer", "target", "maker", "france", "food", "margin", "drug", "build", "auction", "bigger", "aim", "goal", "pricing", "premium", "roughly", "proposed", "moving", "opening", "doesn", "competitive", "developed", "greek", "dairy", "double", "film", "confident", "kraft", "stay", "competitor", "success", "bid", "product", "wednesday", "brand", "line", "competition", "good", "hard", "make", "higher", "international", "work", "growth", "business", "year", "world", "tough", "sell", "partner", "board", "bailout", "agreed", "stake", "proposal", "director", "merger", "continued", "takeover", "panel", "approved", "backed", "division", "barclays", "approval", "require", "giant", "address", "structure", "regulation", "oversight", "appeared", "campaign", "right", "representative", "split", "poor", "william", "cap", "listed", "shareholder", "issue", "member", "vote", "leader", "american", "group", "transaction", "give", "family", "management", "president", "pay", "oil", "energy", "spain", "barrel", "july", "opec", "crude", "cable", "microsoft", "british", "britain", "producer", "russia", "intervention", "spanish", "negotiation", "houston", "dubai", "libya", "cover", "capacity", "disruption", "rajoy", "pound", "civil", "poll", "gas", "strike", "gasoline", "saudi", "budget", "fuel", "talk", "gold", "country", "power", "august", "run", "domestic", "buy", "london", "automaker", "chrysler", "car", "auto", "vehicle", "ford", "plant", "toyota", "launch", "swap", "book", "mobile", "bush", "supplier", "announcement", "see", "truck", "operator", "carmaker", "gave", "honda", "detroit", "forward", "music", "ipo", "renault", "aluminum", "wireless", "remaining", "cbs", "incentive", "service", "industry", "model", "application", "boeing", "order", "aircraft", "airline", "plane", "note", "airbus", "eads", "carrier", "jet", "class", "air", "airway", "protest", "military", "pentagon", "passenger", "klm", "error", "pre", "tanker", "body", "replace", "subsidiary", "reducing", "lee", "care", "beginning", "land", "possibly", "engine", "defense", "production", "thursday", "won", "issue"], "Total": [1644.0, 1328.0, 2314.0, 1376.0, 1243.0, 1906.0, 737.0, 721.0, 1007.0, 815.0, 522.0, 460.0, 499.0, 610.0, 603.0, 334.0, 612.0, 614.0, 428.0, 451.0, 596.0, 246.0, 305.0, 240.0, 517.0, 295.0, 575.0, 663.0, 289.0, 444.0, 1376.206396573982, 1243.280227794938, 374.0440059468913, 367.9073089986503, 326.70777471646977, 315.46343899311495, 302.3904600422341, 297.70042840223493, 273.0413904949627, 259.5217222199479, 256.080503498516, 255.30449338165394, 229.13032643256605, 210.3183277586596, 209.93293634070574, 205.8496198932135, 200.34936018682143, 182.15600827003726, 177.21847057814313, 173.9002527351293, 168.06547902335527, 166.9155747102983, 165.92683458002975, 165.08731522137737, 161.97085975332962, 158.72119032238666, 146.37182097116033, 143.29892659889973, 141.46848173093167, 137.23511939571716, 216.32213302199062, 515.0778556212334, 330.4852529255787, 253.15457208315675, 195.98247197271576, 476.08914169727007, 1906.9986704524515, 524.099650278784, 344.2583000180429, 663.7293575519034, 300.37824867516144, 581.1180851570351, 310.77933475567187, 2314.28903151118, 421.1858947057328, 367.4571616205675, 614.5297224234549, 334.6503227205946, 451.77168121035487, 333.4799093175073, 290.22436763602514, 208.32943277408634, 176.70416640673025, 170.28410154341674, 135.5939886679449, 134.06282754926642, 119.30597717828246, 99.24988236953678, 87.31998571918099, 84.34489916220238, 83.36850808967878, 77.3129796319241, 74.56294895088259, 74.55000168573737, 74.02350763721694, 72.40528957226361, 68.53254833058602, 64.6855618154157, 60.95945764082883, 60.82601912187985, 59.084637099880354, 59.04057711555493, 59.000231078193366, 58.9577960967474, 58.81640057856212, 52.24346994634654, 51.68430969862755, 51.529823966754904, 610.6702614683522, 444.84992681289344, 166.09816035132968, 153.8314933019356, 368.4055611110364, 280.3769614403498, 138.7704749434924, 596.7141268323534, 1906.9986704524515, 151.34842385614445, 2314.28903151118, 304.8984052502135, 324.62334776710526, 234.38655091717487, 216.44750298871054, 196.9244929364397, 663.7293575519034, 278.6568284575788, 284.5888449210626, 208.4255813654033, 253.0499967188932, 208.43098468540418, 524.099650278784, 612.2458832772543, 737.4337639259037, 1644.6561356331786, 198.3929545363337, 116.59491932445498, 115.2178362274905, 113.13231998389169, 104.70889275439954, 84.1024476459144, 78.45761867402936, 75.7504399515872, 71.08550054844467, 70.12024855823199, 66.83397546641977, 64.49276186389092, 63.28716807108426, 57.4328831763403, 57.3367591921615, 55.88187887592576, 54.573719603563426, 54.46169622028182, 50.28057451177819, 49.88389971348364, 49.429637997864866, 47.04485000749006, 46.93849004014035, 46.51286590728307, 43.54004919308148, 41.61041130421833, 40.67988599691397, 39.59763467383352, 39.367593422878365, 109.6849077504627, 172.36366046457587, 815.8298191084216, 183.93391504721762, 139.59080167376672, 269.23787152979514, 141.75993852984078, 575.8451128296468, 195.6038698056273, 1007.059035442251, 331.0570170460905, 118.10995260322939, 596.7141268323534, 90.18695835287987, 141.6030528402063, 260.99396209108556, 1906.9986704524515, 581.1180851570351, 442.27105717110607, 721.8484340895932, 190.1579838451018, 346.25489207835113, 133.81686026351494, 262.9303068641405, 499.143593762148, 190.3414550108904, 179.22036357183194, 146.84909781501534, 118.1579370823132, 116.75725512100313, 100.94627134797497, 95.41564506740409, 94.73152785289825, 87.75158573813819, 83.18232792631632, 79.6650172280778, 77.76255496485173, 77.02816501091016, 73.80815935779309, 72.32582892768046, 67.23012961822832, 65.58739961358576, 64.10909251661674, 62.37985343260842, 60.10510537923087, 59.97450641926588, 59.93223717094256, 58.86774920812893, 58.19631907348985, 58.09344709522793, 57.81840815949736, 57.004706568242916, 54.23653589205674, 54.095840641950474, 109.35495463785789, 264.26657226574343, 124.09388430964165, 91.72859439848976, 113.38754996166925, 230.85621503692948, 81.943623475567, 127.20569468671292, 138.0656945509031, 77.68810178441628, 146.90350891044804, 139.9882259661133, 99.34218036785484, 142.78025549659645, 294.742969354558, 476.08914169727007, 290.0744956756757, 260.8193610401403, 310.77933475567187, 172.4844141460386, 136.6528072383359, 120.74901753341197, 106.65792933750198, 101.71237897906164, 66.92879076124746, 66.90328874508906, 63.16383183480997, 57.402774209599706, 55.46565239419757, 54.53684297813567, 53.41585725973845, 51.78094326797641, 49.04146703442871, 47.57765193137646, 45.829381215132976, 45.75215572504233, 44.682554865031854, 43.22998029195098, 42.467651491442815, 40.41815867045712, 37.5177943360038, 37.3622355821827, 37.012193332071234, 33.39572206472424, 33.199933114325226, 33.15225749074242, 33.05240868179856, 31.36674865344098, 31.16887164491001, 1328.68804046532, 117.67896779970692, 160.98795714113237, 311.3915682856063, 737.4337639259037, 336.2251758773136, 74.2352125676248, 167.26409443474046, 175.2050555363268, 213.44909036553236, 421.1858947057328, 260.99396209108556, 216.69458529183592, 294.742969354558, 442.27105717110607, 367.4571616205675, 253.0499967188932, 252.6507980820648, 185.65476973502493, 134.6971703704719, 284.74541433212295, 284.9097286867227, 344.2583000180429, 465.509589078318, 236.37156881397746, 289.3398948857143, 136.87387020018033, 118.42531136346, 71.60119514722301, 67.88934820597784, 62.14768139183992, 53.04369019201328, 49.21953862888004, 48.721823898954554, 46.668051393769346, 44.65777490200802, 43.39892339895774, 42.86529268435699, 42.615844483722114, 42.056208268693204, 41.66566434798891, 40.9763409724633, 40.26234050646972, 40.22245274490233, 38.34996336287204, 36.58344373181885, 34.95897933199211, 34.472510954612524, 34.39419734466578, 34.043575740125526, 33.91541763301777, 33.811577863893845, 33.38761449133512, 33.310313827076115, 32.111164808624196, 721.8484340895932, 316.8031681616765, 88.85645287123366, 103.08282989532475, 159.73466462179223, 211.86797327750867, 59.89319381696394, 214.21121278353402, 112.27711414045413, 612.2458832772543, 316.8024960377288, 106.16060362133166, 2314.28903151118, 167.9862311374148, 217.1429634441066, 614.5297224234549, 198.2793833125767, 1007.059035442251, 100.12122316133816, 198.54617270400027, 178.8916818446357, 173.64159977163328, 208.4255813654033, 195.8689989298689, 231.69352739473575, 278.6568284575788, 199.8131981147912, 223.0039364043689, 165.2593017285922, 127.51227490756644, 115.29856093290398, 108.74864933278963, 106.01553999924562, 100.49598076376047, 87.3466135292381, 83.13475638528305, 77.35591435140599, 76.35836028569204, 71.73206865318573, 71.45807524547804, 70.02597726670909, 64.25214014789537, 59.64701397386966, 59.45083123792158, 56.52992838865899, 48.49459268002247, 48.286846207320714, 44.65867985508982, 41.94323181568093, 39.8812019308393, 37.14127518116212, 36.88462052505092, 36.09510240548405, 35.877533892561914, 34.11850952498354, 33.01574167106659, 32.32967068611442, 123.30537032124394, 93.46097821921352, 133.06099845094948, 132.33599094536174, 290.0744956756757, 100.96259234436914, 364.82383302426314, 294.94092014654274, 127.5137324003301, 603.6723046097607, 402.5083904944186, 128.74711519226753, 154.70050081295435, 515.0778556212334, 295.0723035404899, 163.69603952286977, 114.89171261569282, 112.90765612967326, 88.81677075104663, 87.85333604560368, 82.98165023923393, 71.57957698497388, 69.62134386747579, 63.33772894366487, 61.47256359296112, 60.22667745321334, 54.19822663740044, 51.6627383121668, 51.42190433857336, 51.197044100605204, 522.0337059529631, 46.61225817618826, 46.26606182858884, 44.951014573274044, 44.77106902590817, 40.340501923328375, 39.4912047930869, 38.4561686249881, 34.95440452774594, 34.610297925575146, 34.07721351811721, 33.63228538135667, 32.283911066715724, 32.21622257683883, 230.1328883652386, 65.83851995261993, 135.6556689727849, 257.1247381130336, 240.3157122037072, 603.6723046097607, 1007.059035442251, 190.1579838451018, 223.78142663825182, 198.2793833125767, 212.93465372640034, 614.5297224234549, 62.12144486820965, 289.9955885092231, 198.91886797923314, 316.8031681616765, 211.68847091599744, 178.8916818446357, 460.7892605622439, 213.14583040761224, 155.70345145564352, 116.86977826483441, 112.1283559877343, 85.46615072656877, 61.02931246823216, 58.80866676597441, 58.62440370097703, 56.042741074747816, 53.19265910912137, 50.92301569278802, 47.10519998243604, 45.52346834109989, 44.666047128794666, 41.02361640480972, 39.48882640262803, 38.29329353063758, 37.61367599587587, 37.507918024289324, 37.43571525789008, 34.388108179598966, 33.40000507844144, 32.83922653188566, 32.34181709976262, 32.138956993472576, 31.560692851373037, 28.881873943184367, 28.808969897976038, 28.59619249848485, 54.697260534869955, 213.57397935757282, 428.6074542161316, 290.71870820337216, 211.68847091599744, 66.06967977047248, 62.69894776447279, 182.46281009483457, 110.48970930532548, 176.281636173398, 100.6052482379889, 88.73822259659755, 83.82160606208221, 68.07851777382125, 273.5228233602537, 94.35703094358674, 212.93465372640034, 165.42719442871717, 173.44410218584537, 230.85621503692948, 612.2458832772543, 165.4569786346425, 144.1187095316055, 153.41630743958544, 202.00965026245416, 200.44234127652976, 163.0617748635303, 122.51571666518173, 118.43537425903585, 82.5318939305421, 82.44390340424049, 82.0622411892612, 77.5689583808318, 74.06385175230531, 68.54962605995631, 64.13114488183653, 60.56728596141711, 59.433672861102295, 59.32056332896159, 56.231087879758896, 52.772119034299934, 51.97037639274385, 46.23866468110768, 46.13249670371156, 44.2033985731359, 43.60524264755214, 42.01697012953177, 41.91805901146818, 41.80661060549835, 41.59023238908469, 41.40815943132499, 40.428584587704805, 39.83782745687737, 39.81891100083755, 115.10118586154516, 114.8876055116943, 116.24373879747972, 152.2624534205295, 168.497524241207, 300.2003621026156, 74.27663853254728, 114.72165735775052, 365.1629178259313, 581.1180851570351, 219.4059453929638, 70.8787566568958, 108.2332756939295, 182.66481270387342, 305.1845877016201, 195.49055327366304, 184.3656682712283, 100.00739399824586, 92.5117029432286, 91.51249604024454, 73.44063442486828, 71.98500882541416, 66.81231785617774, 52.9824658160978, 52.65768167374372, 52.55980669229142, 49.83678759713237, 49.42895385532745, 49.203265906461766, 46.243265795242415, 45.682876043040025, 44.68177627239193, 44.502580289005145, 44.46611989786572, 43.600231876798375, 42.64307561734873, 41.18211024826124, 39.391920316623356, 38.77494482408204, 37.77222365069227, 36.461371112288184, 35.979757427656914, 35.543231871861785, 34.672639874007054, 205.24568897670835, 296.96207476219104, 341.6573112700551, 124.91201845085, 156.26770317156033, 82.89557636914007, 231.69352739473575, 79.70853199010149, 365.1629178259313, 324.62334776710526, 179.97892969982757, 182.66481270387342, 444.84992681289344, 575.8451128296468, 1906.9986704524515, 300.2003621026156, 74.9685400175456, 198.91886797923314, 136.55929815468167, 161.44710344655067, 142.71652953621182, 132.20487906694547, 123.05837704810502, 117.57401354648374, 111.73375682904349, 100.32868380350956, 70.90539203360012, 67.66538459344237, 62.01717007544675, 60.29163013052677, 56.369964578094695, 54.699419847370685, 53.012513508920726, 52.659744356964744, 51.7938046457935, 49.972170760902316, 47.35864431351326, 44.78495536038411, 42.48227952774349, 42.14106803217197, 41.293246449008926, 41.178628188309865, 39.59898768567193, 38.64938220823828, 36.91475378957143, 36.56128746220581, 35.58610504079039, 35.00625187119624, 34.771403592415815, 217.2926256730818, 256.4593338247487, 120.07991594567325, 65.59292267145743, 93.80383299160587, 118.367031426066, 517.2090732396917, 70.1924268391871, 108.87580308850647, 61.0882991111149, 155.26977790016826, 168.61139174575868, 264.26657226574343, 334.4275371857732, 201.89502072695333, 130.84252508790988, 113.35834075202243, 109.61901697812047, 95.34658819548005, 79.59280408588847, 69.76281994872802, 69.11262220040179, 67.99853405727424, 66.33621198549146, 66.1994042649155, 63.398757978342545, 58.00902770345676, 54.08585698442515, 51.22738699340943, 50.816499727149555, 45.073908032349784, 42.475875975218365, 41.00950949109279, 40.99745467294208, 39.43238349124004, 38.825453788850595, 37.96736861110925, 37.00224504049276, 36.65860056871226, 36.319025513690946, 35.95004080352665, 34.12926316414987, 33.75009636156481, 100.82470227644525, 63.18109300260172, 216.69458529183592, 50.44907242401441, 428.6074542161316, 117.96686665875413, 107.58095475082398, 133.81686026351494, 59.70664780514928, 195.6038698056273, 142.6671214295707, 238.3279224830611, 142.61155432499785, 128.5426764734025, 107.4158188131876, 87.68496085869532, 82.11297174895141, 79.07275761949856, 78.49699139798443, 73.59356137883528, 71.29517256867683, 68.24005207509308, 67.41637260361554, 63.120864686177924, 59.34039017877192, 58.958705198939555, 58.30538407612425, 57.978195873629, 57.59319016308725, 54.47312438301627, 50.41064385090697, 47.96799405499642, 47.67509662020175, 46.85171697366042, 45.85950928295228, 42.57885011817423, 40.66557475437637, 36.893075688141764, 36.0102351367514, 34.44810991921645, 33.35422465538915, 46.5899131847601, 229.51518838542722, 352.0408644836688, 92.47987641336803, 55.403981974365344, 246.2378814402038, 240.92216248391497, 91.9039481501396, 89.39727367575621, 81.26361178722479, 66.24226866648586, 59.091794831362805, 57.303136752532076, 53.190459407444884, 52.164450682910626, 48.49542822834674, 46.87551828122644, 35.318962659104066, 35.01224508416255, 34.77389049647367, 32.74887269143093, 31.670777717434092, 30.482186459979467, 30.220178862415484, 30.14290142148891, 29.49578546942596, 28.977401874237774, 28.48574653714481, 28.15775582480653, 27.99589514516865, 27.85912327956122, 27.067535015195755, 26.369292929164786, 26.254972210474023, 25.682536584093096, 51.51178608335383, 80.09082884149606, 147.27213584844398, 465.509589078318, 94.66261087651228, 256.4593338247487], "loglift": [30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 1.6425, 1.6424, 1.6407, 1.6407, 1.6404, 1.6403, 1.6401, 1.6401, 1.6398, 1.6397, 1.6396, 1.6396, 1.6392, 1.6388, 1.6388, 1.6387, 1.6386, 1.6382, 1.638, 1.6379, 1.6378, 1.6377, 1.6377, 1.6377, 1.6375, 1.6374, 1.6369, 1.6368, 1.6367, 1.6365, 1.599, 1.4515, 1.5012, 1.5456, 1.5762, 1.2771, 0.7951, 1.2411, 1.3779, 1.1051, 1.4095, 1.0669, 1.3539, 0.3093, 1.0323, 1.1381, 0.652, 1.1975, 2.2123, 2.2115, 2.2111, 2.2099, 2.2091, 2.2089, 2.2076, 2.2075, 2.2067, 2.2051, 2.2039, 2.2035, 2.2034, 2.2025, 2.2021, 2.2021, 2.202, 2.2017, 2.201, 2.2002, 2.1993, 2.1993, 2.1989, 2.1988, 2.1988, 2.1988, 2.1988, 2.1968, 2.1966, 2.1966, 2.1698, 1.9823, 2.0666, 2.0661, 1.9147, 1.9309, 2.0424, 1.7201, 1.2947, 1.9586, 1.2204, 1.7493, 1.717, 1.7854, 1.801, 1.8306, 1.3345, 1.6772, 1.6535, 1.7723, 1.6495, 1.7489, 1.1039, 0.9516, 0.572, 2.4508, 2.4468, 2.4436, 2.4435, 2.4434, 2.4427, 2.4406, 2.4398, 2.4394, 2.4386, 2.4384, 2.4378, 2.4373, 2.437, 2.4355, 2.4355, 2.4351, 2.4347, 2.4346, 2.4332, 2.4331, 2.4329, 2.432, 2.4319, 2.4318, 2.4304, 2.4294, 2.4289, 2.4283, 2.4282, 2.4155, 2.3833, 2.1818, 2.3068, 2.3166, 2.2008, 2.2239, 1.9502, 2.1371, 1.7088, 1.8652, 2.1409, 1.506, 2.2235, 2.0114, 1.6893, 0.3015, 0.956, 1.1288, 0.7011, 1.6698, 1.179, 1.9019, 1.239, 2.6591, 2.6562, 2.6559, 2.6547, 2.6532, 2.6532, 2.6519, 2.6514, 2.6513, 2.6506, 2.65, 2.6495, 2.6492, 2.6491, 2.6486, 2.6483, 2.6474, 2.647, 2.6467, 2.6463, 2.6458, 2.6457, 2.6457, 2.6454, 2.6453, 2.6452, 2.6452, 2.6449, 2.6441, 2.6441, 2.6234, 2.4361, 2.5149, 2.565, 2.5047, 2.3233, 2.5619, 2.4005, 2.3356, 2.542, 2.2039, 2.2051, 2.3875, 2.1554, 1.6652, 1.14, 1.4075, 1.4853, 1.2684, 2.7774, 2.7761, 2.7752, 2.7742, 2.7738, 2.7691, 2.7691, 2.7683, 2.7668, 2.7663, 2.766, 2.7656, 2.7651, 2.7641, 2.7635, 2.7628, 2.7627, 2.7623, 2.7616, 2.7612, 2.7601, 2.7583, 2.7582, 2.758, 2.7553, 2.7551, 2.755, 2.755, 2.7535, 2.7533, 2.7514, 2.7312, 2.7145, 2.6364, 2.5662, 2.4722, 2.6399, 2.3995, 2.3653, 2.2643, 1.9955, 2.148, 2.1993, 2.075, 1.8736, 1.852, 1.9346, 1.9315, 1.9917, 2.1861, 1.58, 1.5457, 1.3153, 1.0064, 1.5664, 2.8143, 2.8108, 2.8098, 2.8047, 2.804, 2.8028, 2.8003, 2.7989, 2.7987, 2.7979, 2.797, 2.7964, 2.7961, 2.796, 2.7957, 2.7955, 2.7951, 2.7947, 2.7947, 2.7936, 2.7924, 2.7912, 2.7909, 2.7908, 2.7905, 2.7904, 2.7903, 2.79, 2.7899, 2.7889, 2.6252, 2.5741, 2.6945, 2.6693, 2.6149, 2.5549, 2.7178, 2.492, 2.5901, 2.242, 2.3487, 2.5733, 1.8124, 2.4016, 2.2442, 1.8667, 2.1742, 1.2617, 2.3738, 1.9804, 2.0098, 2.0142, 1.7768, 1.7957, 1.646, 1.4787, 1.7317, 2.8555, 2.8541, 2.8524, 2.8517, 2.8512, 2.851, 2.8505, 2.8491, 2.8486, 2.8478, 2.8476, 2.8469, 2.8468, 2.8465, 2.8454, 2.8443, 2.8442, 2.8434, 2.8407, 2.8406, 2.8391, 2.8377, 2.8366, 2.8349, 2.8347, 2.8342, 2.834, 2.8327, 2.8318, 2.8312, 2.7306, 2.7479, 2.6227, 2.6158, 2.4447, 2.5251, 2.0345, 2.0897, 2.3989, 1.6436, 1.6635, 2.2954, 2.1046, 1.1038, 2.9062, 2.9037, 2.9014, 2.9012, 2.899, 2.8989, 2.8983, 2.8966, 2.8962, 2.8949, 2.8945, 2.8941, 2.8924, 2.8916, 2.8915, 2.8914, 2.8899, 2.8897, 2.8895, 2.8889, 2.8889, 2.8866, 2.8861, 2.8855, 2.8831, 2.8828, 2.8824, 2.882, 2.8809, 2.8808, 2.8791, 2.8586, 2.7974, 2.5475, 2.534, 1.9939, 1.7455, 2.2892, 2.1557, 2.1546, 2.0963, 1.4869, 2.7037, 1.6925, 1.8696, 1.3643, 1.6866, 1.8252, 2.9263, 2.924, 2.9225, 2.9205, 2.9202, 2.9176, 2.9134, 2.9128, 2.9127, 2.912, 2.9111, 2.9104, 2.9089, 2.9082, 2.9078, 2.906, 2.9051, 2.9044, 2.9039, 2.9039, 2.9038, 2.9016, 2.9008, 2.9004, 2.8999, 2.8997, 2.8992, 2.8965, 2.8964, 2.8961, 2.88, 2.8068, 2.5832, 2.5654, 2.5739, 2.7634, 2.7589, 2.5222, 2.6059, 2.3769, 2.5641, 2.5862, 2.5938, 2.6583, 1.9224, 2.4584, 1.9608, 2.0972, 2.0279, 1.6657, 0.8242, 1.8917, 1.9922, 1.921, 2.9292, 2.9291, 2.9281, 2.9262, 2.926, 2.9226, 2.9226, 2.9226, 2.9219, 2.9214, 2.9204, 2.9194, 2.9186, 2.9183, 2.9183, 2.9174, 2.9164, 2.9161, 2.9139, 2.9139, 2.913, 2.9127, 2.9119, 2.9118, 2.9118, 2.9117, 2.9116, 2.911, 2.9107, 2.9107, 2.896, 2.5749, 2.529, 2.4272, 2.3703, 2.1181, 2.6295, 2.3723, 1.6489, 1.3564, 1.8493, 2.5867, 2.2508, 1.699, 2.9603, 2.9586, 2.9584, 2.9542, 2.9535, 2.9534, 2.9509, 2.9506, 2.9497, 2.9461, 2.946, 2.9459, 2.945, 2.9448, 2.9447, 2.9435, 2.9433, 2.9428, 2.9428, 2.9427, 2.9423, 2.9419, 2.9411, 2.9401, 2.9397, 2.9391, 2.9382, 2.9378, 2.9375, 2.9369, 2.8996, 2.7334, 2.6519, 2.7771, 2.6706, 2.7232, 2.3799, 2.6749, 1.9296, 1.8321, 2.0598, 1.9886, 1.3792, 1.0796, 0.0839, 1.4287, 2.5737, 1.6678, 1.9998, 3.0336, 3.0328, 3.0323, 3.0318, 3.0315, 3.0311, 3.0301, 3.0264, 3.0257, 3.0245, 3.0241, 3.023, 3.0225, 3.022, 3.0219, 3.0216, 3.0209, 3.0199, 3.0188, 3.0177, 3.0175, 3.017, 3.017, 3.0161, 3.0155, 3.0144, 3.0141, 3.0135, 3.013, 3.0128, 2.9519, 2.9021, 2.8223, 2.8935, 2.7779, 2.703, 2.1147, 2.8109, 2.5682, 2.8083, 2.159, 1.9794, 1.4206, 3.1719, 3.1701, 3.1676, 3.1666, 3.1663, 3.1651, 3.1632, 3.1615, 3.1614, 3.1612, 3.1609, 3.1608, 3.1602, 3.1589, 3.1577, 3.1568, 3.1566, 3.1543, 3.1531, 3.1523, 3.1523, 3.1514, 3.151, 3.1505, 3.1498, 3.1496, 3.1494, 3.1491, 3.1477, 3.1474, 3.0897, 3.0314, 2.3493, 2.9994, 1.8478, 2.5027, 2.5468, 2.2987, 2.8363, 1.8479, 1.9621, 3.3323, 3.3298, 3.3291, 3.3277, 3.3258, 3.325, 3.3246, 3.3245, 3.3238, 3.3234, 3.3228, 3.3226, 3.3217, 3.3208, 3.3207, 3.3205, 3.3204, 3.3203, 3.3194, 3.318, 3.3171, 3.317, 3.3166, 3.3162, 3.3146, 3.3136, 3.3113, 3.3107, 3.3095, 3.3086, 3.2208, 2.5518, 2.2051, 2.7135, 3.013, 3.7138, 3.7137, 3.7076, 3.7073, 3.7063, 3.7037, 3.702, 3.7016, 3.7003, 3.7, 3.6986, 3.698, 3.6915, 3.6913, 3.6911, 3.6894, 3.6885, 3.6873, 3.6871, 3.687, 3.6863, 3.6857, 3.6852, 3.6848, 3.6846, 3.6844, 3.6835, 3.6825, 3.6824, 3.6816, 3.6016, 3.4166, 3.0369, 1.4345, 2.6013, 1.637], "logprob": [30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, -3.1954, -3.297, -4.4998, -4.5164, -4.6355, -4.6706, -4.7131, -4.7287, -4.8155, -4.8664, -4.8798, -4.8829, -4.9914, -5.0775, -5.0793, -5.099, -5.1262, -5.2219, -5.2495, -5.2685, -5.3028, -5.3097, -5.3157, -5.3208, -5.34, -5.3603, -5.4418, -5.4632, -5.4761, -5.5067, -5.0891, -4.3691, -4.7632, -4.9853, -5.2107, -4.6222, -3.7165, -4.5621, -4.8456, -4.462, -4.9504, -4.6331, -4.9719, -4.0087, -4.9896, -5.0203, -4.9921, -5.0543, -3.7395, -4.0438, -4.1831, -4.5159, -4.6813, -4.7185, -4.9477, -4.9591, -5.0766, -5.2622, -5.3915, -5.4265, -5.4383, -5.5146, -5.5512, -5.5514, -5.5586, -5.5809, -5.6366, -5.6952, -5.7554, -5.7576, -5.7871, -5.7879, -5.7886, -5.7893, -5.7917, -5.9122, -5.9231, -5.9262, -3.4806, -3.9849, -4.8858, -4.963, -4.241, -4.4979, -5.0897, -3.9534, -3.217, -5.0867, -3.0977, -4.5956, -4.5652, -4.8226, -4.8866, -4.9515, -4.2326, -4.7578, -4.7604, -4.9531, -4.8819, -4.9765, -4.6993, -4.6961, -4.8898, -2.2088, -4.3279, -4.8626, -4.8746, -4.893, -4.971, -5.1923, -5.2626, -5.2981, -5.3625, -5.3763, -5.425, -5.4611, -5.4802, -5.5788, -5.5805, -5.6066, -5.6307, -5.6328, -5.7141, -5.7221, -5.7314, -5.7818, -5.7842, -5.7934, -5.8608, -5.9072, -5.9303, -5.9579, -5.9638, -4.9518, -4.532, -3.1789, -4.5435, -4.8096, -4.2686, -4.8869, -3.7589, -4.6517, -3.4413, -4.3974, -5.1525, -4.1675, -5.3395, -5.1005, -4.8111, -4.2101, -4.7439, -4.8442, -4.782, -5.1473, -5.0387, -5.2666, -5.254, -3.1929, -4.1599, -4.2204, -4.4208, -4.6397, -4.6517, -4.7984, -4.8553, -4.8625, -4.9398, -4.9939, -5.0376, -5.062, -5.0716, -5.1149, -5.1354, -5.2094, -5.2345, -5.2576, -5.2854, -5.3231, -5.3253, -5.326, -5.3442, -5.3558, -5.3576, -5.3625, -5.3769, -5.4275, -5.4301, -4.7469, -4.0519, -4.729, -4.9811, -4.8294, -4.2999, -5.097, -4.8186, -4.8016, -5.1702, -4.8713, -4.9183, -5.0788, -4.9482, -4.7136, -4.7593, -4.9873, -5.0158, -5.0574, -4.1372, -4.3714, -4.496, -4.6211, -4.669, -5.0922, -5.0926, -5.1509, -5.248, -5.2829, -5.3001, -5.3212, -5.3528, -5.4082, -5.4391, -5.4772, -5.4789, -5.5031, -5.5368, -5.555, -5.6056, -5.6818, -5.6861, -5.6957, -5.8012, -5.8073, -5.8088, -5.8119, -5.8657, -5.8722, -2.1216, -4.5658, -4.2691, -3.6875, -2.8956, -3.775, -5.1178, -4.5459, -4.5337, -4.4372, -4.0263, -4.3525, -4.4871, -4.3038, -4.0994, -4.3064, -4.5968, -4.6014, -4.8493, -4.9758, -4.8333, -4.867, -4.9083, -4.9153, -5.0332, -3.583, -4.335, -4.4809, -4.9891, -5.043, -5.1326, -5.2936, -5.3697, -5.3801, -5.424, -5.4689, -5.4981, -5.5107, -5.5167, -5.5302, -5.5397, -5.5568, -5.5748, -5.5758, -5.6246, -5.6729, -5.7195, -5.7339, -5.7362, -5.7468, -5.7506, -5.7538, -5.7667, -5.7691, -5.8068, -2.8579, -3.7325, -4.8834, -4.7601, -4.3765, -4.154, -5.2546, -4.206, -4.7539, -3.4058, -3.9579, -4.8266, -2.5056, -4.5394, -4.4402, -3.7774, -4.601, -3.8884, -5.0848, -4.7935, -4.8684, -4.8938, -4.9485, -4.9918, -4.9735, -4.9563, -5.0358, -3.8022, -4.1033, -4.3643, -4.4657, -4.5247, -4.5504, -4.6043, -4.7459, -4.7959, -4.8687, -4.8819, -4.9451, -4.949, -4.9695, -5.0567, -5.1322, -5.1356, -5.1867, -5.3427, -5.3471, -5.4268, -5.4909, -5.5424, -5.6153, -5.6224, -5.6446, -5.6508, -5.7024, -5.7362, -5.7578, -4.5196, -4.7795, -4.5514, -4.5637, -3.9501, -4.925, -4.131, -4.2885, -4.8178, -4.0183, -4.4037, -4.9116, -4.9188, -4.7168, -3.4715, -4.0632, -4.4196, -4.4371, -4.6793, -4.6903, -4.748, -4.8976, -4.9257, -5.0216, -5.0519, -5.0727, -5.1798, -5.2286, -5.2333, -5.2378, -2.9173, -5.3334, -5.341, -5.3704, -5.3745, -5.481, -5.5027, -5.5299, -5.6278, -5.638, -5.6539, -5.6674, -5.7095, -5.7117, -3.7472, -5.0191, -4.3574, -3.9679, -4.049, -3.668, -3.4047, -4.5279, -4.4985, -4.6206, -4.6076, -4.1571, -5.2321, -4.7026, -4.9024, -4.9423, -5.0232, -5.0529, -3.0057, -3.7789, -4.0945, -4.3834, -4.4251, -4.6992, -5.0402, -5.0778, -5.081, -5.1268, -5.1799, -5.2242, -5.3036, -5.3385, -5.3579, -5.4448, -5.4838, -5.5153, -5.5336, -5.5365, -5.5385, -5.6256, -5.6555, -5.6729, -5.6886, -5.6951, -5.7138, -5.8052, -5.8078, -5.8155, -5.1831, -3.8941, -3.4212, -3.8271, -4.1359, -5.1108, -5.1677, -4.3361, -4.7541, -4.516, -4.8896, -4.9931, -5.0424, -5.186, -4.5312, -5.0594, -4.7432, -4.8592, -4.8812, -4.9574, -4.8236, -5.0645, -5.1021, -5.1108, -3.8274, -3.8353, -4.0427, -4.3304, -4.3646, -4.7291, -4.7302, -4.7349, -4.7918, -4.8386, -4.917, -4.9845, -5.0426, -5.0617, -5.0637, -5.118, -5.1826, -5.1982, -5.3172, -5.3196, -5.3631, -5.377, -5.415, -5.4174, -5.4201, -5.4254, -5.4299, -5.4544, -5.4694, -5.4699, -4.4231, -4.7461, -4.7803, -4.6121, -4.5677, -4.2424, -5.1276, -4.9501, -4.5157, -4.3435, -4.8247, -5.2172, -5.1299, -5.1583, -3.3837, -3.8308, -3.8896, -4.5055, -4.5841, -4.5951, -4.8175, -4.8378, -4.9134, -5.1489, -5.1551, -5.157, -5.2112, -5.2196, -5.2242, -5.2875, -5.2999, -5.3225, -5.3266, -5.3275, -5.3475, -5.3702, -5.4058, -5.4513, -5.4675, -5.4943, -5.5305, -5.5441, -5.5567, -5.5821, -3.8411, -3.6379, -3.5792, -4.4602, -4.3427, -4.9242, -4.2396, -5.0117, -4.235, -4.4501, -4.8123, -4.8686, -4.588, -4.6295, -4.4277, -4.9318, -5.1741, -5.1042, -5.1483, -3.9472, -4.0712, -4.1482, -4.2205, -4.2664, -4.3177, -4.4263, -4.7772, -4.8246, -4.913, -4.9417, -5.01, -5.0406, -5.0724, -5.0792, -5.0961, -5.1325, -5.1873, -5.2443, -5.2982, -5.3064, -5.3272, -5.33, -5.37, -5.3949, -5.4419, -5.4518, -5.4795, -5.4964, -5.5033, -3.7318, -3.6159, -4.4545, -4.988, -4.7458, -4.5881, -3.7018, -5.0028, -4.8065, -5.1443, -4.8608, -4.9579, -5.0674, -3.0806, -3.5871, -4.0233, -4.1678, -4.2016, -4.3424, -4.5248, -4.6583, -4.6678, -4.6842, -4.7093, -4.7114, -4.7553, -4.8455, -4.9166, -4.9719, -4.9801, -5.1023, -5.1629, -5.1988, -5.1991, -5.2389, -5.2548, -5.2777, -5.3041, -5.3137, -5.3232, -5.3337, -5.387, -5.3985, -4.3619, -4.8875, -4.3371, -5.1446, -4.1566, -4.7918, -4.8399, -4.8697, -5.1392, -4.9409, -5.1423, -3.2589, -3.775, -3.8796, -4.0605, -4.2654, -4.3318, -4.3699, -4.3773, -4.4426, -4.4747, -4.5191, -4.5314, -4.5982, -4.6609, -4.6674, -4.6787, -4.6845, -4.6912, -4.7478, -4.8267, -4.8773, -4.8836, -4.9013, -4.9232, -4.9989, -5.0459, -5.1456, -5.1705, -5.216, -5.2491, -5.0028, -4.0772, -3.9961, -4.8245, -5.0373, -2.8448, -2.8667, -3.8366, -3.8645, -3.9609, -4.1679, -4.2838, -4.315, -4.3907, -4.4106, -4.4848, -4.5195, -4.809, -4.8179, -4.825, -4.8866, -4.9211, -4.9605, -4.9694, -4.972, -4.9944, -5.0127, -5.0303, -5.0423, -5.0483, -5.0533, -5.0831, -5.1102, -5.1147, -5.1375, -4.5215, -4.2652, -4.0358, -4.4873, -4.9134, -4.881]}, "token.table": {"Topic": [4, 11, 13, 7, 4, 2, 5, 7, 12, 3, 5, 1, 7, 12, 4, 10, 5, 10, 11, 15, 15, 15, 15, 15, 7, 14, 6, 12, 1, 6, 8, 3, 10, 14, 10, 12, 3, 6, 14, 12, 12, 2, 9, 8, 3, 5, 1, 5, 11, 8, 13, 9, 9, 4, 14, 14, 6, 8, 12, 7, 10, 12, 1, 5, 10, 12, 4, 12, 13, 1, 4, 5, 3, 15, 9, 5, 4, 11, 11, 1, 12, 1, 6, 12, 15, 15, 1, 9, 14, 8, 8, 8, 11, 14, 8, 7, 13, 13, 6, 8, 6, 13, 10, 11, 14, 1, 2, 3, 11, 3, 13, 13, 4, 8, 12, 8, 12, 13, 1, 5, 14, 6, 15, 14, 15, 4, 7, 10, 6, 14, 3, 3, 12, 3, 6, 1, 3, 11, 4, 7, 10, 9, 9, 14, 3, 12, 13, 7, 15, 15, 5, 9, 1, 8, 3, 10, 4, 9, 8, 1, 5, 7, 7, 3, 3, 4, 3, 11, 11, 11, 7, 5, 8, 3, 5, 7, 9, 11, 5, 11, 7, 6, 12, 2, 3, 1, 3, 15, 1, 3, 9, 13, 14, 10, 2, 9, 13, 4, 13, 1, 10, 7, 10, 13, 9, 1, 3, 14, 1, 2, 11, 1, 2, 1, 2, 7, 4, 1, 5, 9, 1, 5, 10, 2, 7, 4, 15, 10, 3, 2, 6, 9, 5, 5, 14, 11, 2, 7, 9, 3, 3, 12, 6, 5, 5, 13, 12, 11, 1, 9, 2, 13, 6, 8, 10, 11, 8, 2, 8, 11, 13, 9, 10, 15, 6, 8, 9, 2, 5, 2, 1, 2, 1, 2, 5, 7, 7, 3, 4, 7, 2, 1, 2, 3, 13, 11, 15, 8, 15, 8, 9, 9, 13, 14, 5, 9, 15, 3, 8, 6, 4, 6, 8, 9, 1, 2, 3, 2, 9, 13, 2, 3, 4, 2, 6, 6, 12, 1, 2, 1, 4, 7, 4, 3, 4, 4, 8, 11, 1, 5, 1, 3, 5, 7, 6, 5, 11, 7, 10, 14, 2, 6, 9, 13, 14, 7, 3, 11, 7, 9, 12, 2, 1, 5, 13, 14, 1, 5, 9, 8, 9, 11, 6, 8, 13, 13, 14, 2, 9, 9, 10, 12, 3, 12, 3, 9, 11, 9, 13, 7, 1, 6, 8, 11, 3, 2, 5, 10, 11, 1, 3, 9, 12, 2, 11, 5, 7, 11, 3, 9, 10, 7, 9, 1, 6, 8, 1, 2, 8, 9, 13, 1, 2, 11, 2, 7, 1, 2, 3, 6, 4, 6, 8, 14, 4, 6, 13, 2, 5, 9, 10, 9, 2, 9, 14, 1, 3, 4, 9, 13, 14, 4, 1, 2, 6, 2, 6, 8, 9, 1, 3, 7, 14, 2, 7, 6, 3, 4, 1, 10, 11, 3, 13, 10, 2, 7, 1, 1, 7, 8, 14, 10, 5, 12, 15, 9, 9, 3, 6, 1, 8, 15, 8, 6, 15, 2, 3, 7, 10, 8, 8, 10, 13, 10, 4, 15, 11, 4, 15, 1, 1, 14, 7, 7, 7, 10, 3, 12, 7, 10, 15, 4, 4, 1, 2, 5, 13, 10, 3, 11, 3, 12, 1, 4, 9, 13, 7, 8, 9, 15, 1, 2, 8, 9, 1, 2, 6, 1, 5, 7, 8, 9, 1, 1, 10, 11, 11, 1, 4, 12, 14, 2, 1, 11, 1, 7, 6, 2, 9, 4, 1, 5, 1, 12, 13, 12, 3, 13, 15, 1, 3, 9, 10, 14, 3, 14, 15, 5, 1, 10, 1, 2, 7, 1, 8, 1, 5, 8, 9, 11, 14, 3, 8, 1, 10, 14, 8, 13, 6, 10, 3, 14, 6, 8, 4, 8, 15, 6, 2, 6, 5, 11, 3, 6, 1, 5, 13, 3, 13, 11, 3, 4, 14, 15, 6, 8, 2, 12, 4, 4, 2, 4, 10, 12, 4, 9, 10, 1, 3, 5, 7, 9, 3, 7, 11, 15, 4, 4, 12, 10, 6, 2, 4, 15, 4, 9, 1, 2, 6, 8, 3, 1, 3, 5, 15, 14, 9, 3, 10, 13, 12, 5, 7, 9, 11, 15, 3, 1, 6, 3, 4, 9, 13, 13, 10, 13, 14, 7, 15, 11, 1, 12, 2, 6, 7, 9, 11, 7, 1, 5, 12, 15, 13, 2, 11, 11, 14, 15, 6, 8, 1, 5, 5, 4, 8, 8, 12, 11, 15, 1, 5, 1, 2, 3, 4, 13, 8, 9, 2, 3, 6, 2, 11, 2, 1, 2, 5, 15, 6, 10, 12, 1, 5, 5, 5, 14, 5, 14, 15, 1, 1, 3, 6, 12, 12, 5, 5, 7, 6, 3, 1, 1, 6, 6, 4, 10, 13, 1, 4, 9, 12, 3, 6, 12, 8, 2, 2, 6, 1, 9, 12, 7, 2, 6, 8, 11, 4, 5, 3, 13, 13, 3, 6, 10, 13, 6, 10, 9, 7, 5, 10, 6, 3, 7, 7, 1, 1, 14, 4, 3, 8, 11, 10, 9, 1, 14, 8, 1, 2, 3, 6, 8, 3, 12, 2, 2, 6, 6, 1, 1, 4, 4, 6, 2, 2, 9, 3, 6, 3, 5, 13, 13, 2, 6, 12, 4, 5, 4, 10, 12, 1, 4, 5, 1, 11, 9, 1, 5, 12, 9, 5, 8, 6, 13, 1, 6, 10, 12, 15, 9, 11, 10, 5, 10, 14, 2, 7, 15, 1, 2, 14, 1, 12, 5, 13, 15, 11, 4, 5, 3, 5, 1, 2, 3, 5, 6, 15, 10, 1, 3, 4, 10, 8, 1, 1, 3, 5, 7, 10, 11, 14, 7, 7, 9, 7, 8, 9, 10, 12, 5, 2, 10, 14, 4, 1, 4, 4, 9, 6, 2, 14, 6, 3, 8, 10, 12, 2, 5, 6, 8, 8, 6, 4, 7, 11, 14, 1, 7, 9, 8, 12, 14, 2, 15, 3, 7, 10, 11, 2, 3, 11, 1, 7, 10, 11, 15, 2, 2, 7, 9, 1, 2, 3, 11, 8, 1, 3, 6, 7, 9], "Freq": [0.7650325342022802, 0.20132435110586322, 0.030198652665879483, 0.9906257021056956, 0.9844451464696108, 0.20038719872976724, 0.3296692624263913, 0.47187953249267767, 0.9713115877110193, 0.9889736764811397, 0.9835602123414124, 0.20291445513204276, 0.7891117699579441, 0.9908862738240142, 0.7242928833645295, 0.27523129567852117, 0.9938314071763004, 0.9926651280008371, 0.9875102425165889, 0.9813224831782376, 0.9815237490335403, 0.9901642076501125, 0.9843700638922824, 0.9626556795612998, 0.969272051764637, 0.9757928643388001, 0.2787938465839818, 0.7181053624132865, 0.3710154150085058, 0.3856607603377889, 0.24083456763710026, 0.42730598164119493, 0.5697413088549266, 0.9837393783376912, 0.9853688074606577, 0.9686814053090765, 0.9894301414835985, 0.2526894187222429, 0.7219697677778367, 0.9874715617209887, 0.9785769579006159, 0.14354307880585654, 0.8453092418567106, 0.9622481321657739, 0.04248847600796556, 0.9517418625784286, 0.9985309264534928, 0.9819028493699341, 0.9878417950126148, 0.45547095313935854, 0.5298335577335396, 0.9945457854061999, 0.9818742923954769, 0.9906259900901833, 0.9961288866222696, 0.9944281707773647, 0.524512424148756, 0.46903514851763756, 0.975696905464669, 0.25580048283518364, 0.740475081891321, 0.9949793514560623, 0.030104884503958953, 0.9693772810274783, 0.5665887461623971, 0.41840399716607785, 0.9890505417717377, 0.9809004810015216, 0.9880172844537847, 0.7497280994670372, 0.24776422171228266, 0.9582065612470008, 0.9840238935077124, 0.9480724442311333, 0.9893490822667997, 0.9929961427880053, 0.058466514253372605, 0.9403364375750761, 0.9814567744070662, 0.9569062449054024, 0.036981883861078355, 0.9991233897931406, 0.9855489315961498, 0.9972306505536119, 0.9662702032956678, 0.9949728228940095, 0.9337569740699916, 0.06122996551278633, 0.9818280901408385, 0.9868648677377095, 0.966770321155742, 0.9910753824479672, 0.8325860176610757, 0.160112695704053, 0.9823665798287113, 0.9760165480230408, 0.9798569748633867, 0.9853153590571057, 0.03037735358327133, 0.9568866378730468, 0.06942743040100546, 0.9223930038990726, 0.9858083892495971, 0.986316472811678, 0.9822425644554997, 0.11808730939098297, 0.12329704362882045, 0.6060657496684273, 0.15281887097656618, 0.7310693808977293, 0.2658434112355379, 0.9890655230208777, 0.8622503888508427, 0.12893463758517273, 0.9713776723469272, 0.9788794299073353, 0.9712550810952656, 0.9756703268312804, 0.2647035569771716, 0.7316525282739798, 0.9957782388830624, 0.9730088055254676, 0.9605603164604224, 0.9913145355920914, 0.9776189297722392, 0.286133394136105, 0.6618989358329176, 0.05171085436194669, 0.9862931088705825, 0.9593987067791022, 0.993229870589289, 0.8644409050891085, 0.1304816460511862, 0.9652609340838297, 0.986900033223481, 0.9906278342234287, 0.9340715993501929, 0.06381855647734237, 0.9910440173410369, 0.3268993271646548, 0.6710038820748178, 0.9982871550407211, 0.9954821074994351, 0.9957117477059104, 0.8739830886932104, 0.12178452875233259, 0.9729139396975516, 0.8758742601285792, 0.11353925594259359, 0.9897840219904038, 0.862124560385666, 0.12123626630423429, 0.9932649638333599, 0.9881702733507486, 0.9842188757131128, 0.9927032464893126, 0.6023241778135776, 0.39221109252977143, 0.9871718315014145, 0.09823480299752603, 0.11334784961253004, 0.7858784239802082, 0.9959825443633737, 0.9996010499587344, 0.027433599235945565, 0.9601759732580948, 0.20507728813293674, 0.7841190428612287, 0.9895174146308168, 0.9847163062205426, 0.9935895944033697, 0.963539773224054, 0.9683890375149216, 0.9915225515853492, 0.1450789278200667, 0.22366334705593618, 0.4352367834602001, 0.1873936151009195, 0.9937969057743703, 0.9795557799870722, 0.9845831054596371, 0.9953691319123361, 0.9872309847300318, 0.35309973194167726, 0.6426415121338526, 0.4108053688560414, 0.5557954990405266, 0.030206277121767752, 0.6394734607164038, 0.15538607456660278, 0.0627520685749742, 0.04183471238331613, 0.09861039347495947, 0.9727758812222359, 0.025664509312180766, 0.7092737119002684, 0.26597764196260065, 0.9942178887875434, 0.9753835268058484, 0.9940059603634371, 0.9807061468553429, 0.9696606372470724, 0.9977931744674668, 0.9925520391862462, 0.9946241950620334, 0.9936537461431219, 0.797122241811732, 0.19751701567016366, 0.25786798579668363, 0.7410311591841541, 0.9712955397104462, 0.3706152543082902, 0.6297179542229355, 0.4148981833518218, 0.2807394893338675, 0.3030992716701932, 0.9977088882308827, 0.8684199898766101, 0.13011170580032835, 0.958083686659524, 0.460333924949506, 0.20054151185919072, 0.3372743608540935, 0.992459063812899, 0.9692346250710842, 0.24971648176573433, 0.7366636212089163, 0.977738523458747, 0.9900932594970167, 0.752558266257159, 0.08559904450318397, 0.16049820844346993, 0.9849183267300698, 0.9922147227233232, 0.9858396381326748, 0.9862332870500676, 0.21867646455140619, 0.07951871438232952, 0.6957887508453833, 0.987521683984835, 0.992359423760904, 0.9934329888310642, 0.9686471156273969, 0.9652434682294506, 0.9815743946970523, 0.9890348121782673, 0.9872133955109159, 0.9887067157512817, 0.30269809790995506, 0.6948297247478514, 0.26797686000084087, 0.7201878112522597, 0.2495690772501139, 0.14448736051322383, 0.6042198712371178, 0.9646648270651592, 0.9919030398140583, 0.17707250730140692, 0.8209725338519774, 0.9940001277450965, 0.9761745080639772, 0.9506874657250809, 0.03656490252788773, 0.9772588932057983, 0.7693470489119161, 0.22655618618265014, 0.9899369256082046, 0.5690575058966151, 0.42679312942246134, 0.9956193583964883, 0.04257616858152415, 0.9563262481388503, 0.4822915064278187, 0.07192066323923613, 0.29614390745567815, 0.14384132647847225, 0.9755408525237615, 0.22011593167239468, 0.7704057608533814, 0.9672169288589673, 0.9944024866876734, 0.7923343352913038, 0.11984889105246613, 0.08655753242678109, 0.9955669004429595, 0.09706516469666275, 0.8929995152092973, 0.9957479757916041, 0.9596237048109266, 0.2928832152819647, 0.703864501242141, 0.6686294041870275, 0.1424947910562518, 0.1863393421504831, 0.018728873302037718, 0.884939263521282, 0.08896214818467915, 0.45751431646892166, 0.5363960951704599, 0.9798136760495569, 0.99295237597709, 0.6607684406539286, 0.2976434417360039, 0.03571721300832047, 0.6697199660661723, 0.3300898978046946, 0.98948725489611, 0.9890535477838558, 0.8475900018668961, 0.13621982172860833, 0.18379411220503333, 0.17698692286410617, 0.6330686087062259, 0.6429153231679207, 0.3550427904061651, 0.19643696378209724, 0.785747855128389, 0.9944141971828993, 0.9985609048578384, 0.054370150271300335, 0.37282388757463086, 0.5670029956864178, 0.9866520900405127, 0.08542458464858073, 0.9030598948564249, 0.8881668931939453, 0.10297587167466032, 0.9800142894439209, 0.5437029180666032, 0.4558557216977634, 0.2631407032928558, 0.20831972344017752, 0.08771356776428527, 0.43856783882142636, 0.9856850377545754, 0.990156324627172, 0.9944687760904951, 0.28217199261570564, 0.7054299815392642, 0.9864458474069827, 0.3724718128039846, 0.6249950757219402, 0.6252846174788431, 0.3709315527416866, 0.9818210083071395, 0.986350397419533, 0.9766858257949074, 0.9899268048294156, 0.9824717429459052, 0.7240493300505416, 0.27151849876895306, 0.9864199706999611, 0.7668660421147827, 0.2294788535116206, 0.8705135885783927, 0.1266201583386753, 0.6041520568572696, 0.39460382092028873, 0.9876211463555803, 0.44144998643941047, 0.3803983925701303, 0.17376222870487434, 0.7235849047576772, 0.27542909277872873, 0.963682243809275, 0.9669121727381425, 0.9918540248737652, 0.9897181102909118, 0.9925577144258506, 0.763823915390766, 0.22033382174733634, 0.9805457568462699, 0.3673910902634951, 0.6245648534479417, 0.9875964955692496, 0.964561482387126, 0.9893491485695757, 0.13875378998381563, 0.8325227399028938, 0.9904208383105643, 0.02589627801633756, 0.3107553361960507, 0.10358511206535025, 0.5567699773512576, 0.9929788104643676, 0.19391572097093243, 0.8054960717254116, 0.9781066323598189, 0.9849195770230255, 0.39249118103912906, 0.12954142428385046, 0.07733816375155252, 0.3963580892267067, 0.7935260381608963, 0.20456336961088262, 0.9861986999724314, 0.2383684597573506, 0.7527425044968966, 0.22123688460457655, 0.578619544350431, 0.19854592208103022, 0.9891526175282956, 0.9596340638354025, 0.13187566312204796, 0.7818342885092844, 0.07535752178402741, 0.10000152122685713, 0.41035106986193093, 0.2965562353624039, 0.09655319290868963, 0.09310486459052215, 0.06777084935918865, 0.6068571510800075, 0.3234517810324913, 0.9894016253986943, 0.9779043286516927, 0.11994377917339791, 0.628505402868605, 0.24948306068066764, 0.9803239520433964, 0.21241904379322865, 0.44719798693311297, 0.3409884650364986, 0.9798200013557667, 0.9817027034573084, 0.9761730562248246, 0.9839323894496156, 0.9867598173871766, 0.9564268305733038, 0.9775785018253231, 0.9934885115507976, 0.9836847641282612, 0.9837545471480024, 0.08585549374469384, 0.9014826843192854, 0.42454273820551996, 0.2801404462988805, 0.060648962600788565, 0.1039696501727804, 0.0808652834677181, 0.049096779248257415, 0.9858451973074094, 0.15072302456206937, 0.5849488810385073, 0.2619709712626444, 0.1622865173582203, 0.14980293909989564, 0.6865968042078551, 0.9813938245212338, 0.5198260158473431, 0.09942027625495634, 0.053971007109833435, 0.3238260426590006, 0.9936186032075075, 0.9898010756934098, 0.9606634199281835, 0.9745314264164142, 0.9902000905660148, 0.3333723569757259, 0.2555854736813899, 0.40560303432046657, 0.9796614683463398, 0.9826056780573029, 0.98563601909521, 0.9835848317183907, 0.9931157827027476, 0.9978336153246307, 0.30148807326460425, 0.2965184896393635, 0.4008797457694188, 0.9864052195733873, 0.9935552923214178, 0.9755626060078972, 0.8734328232836721, 0.12477611761195316, 0.9765376225374665, 0.9862491906304822, 0.08348193978902187, 0.9016049497214361, 0.9950668842044411, 0.9690053498397927, 0.026071892820801596, 0.9919610754417679, 0.9696077026268057, 0.9776773134257866, 0.5692422696502194, 0.13001212331517356, 0.16163669385129686, 0.1370398056565343, 0.960230621870365, 0.9726351935187509, 0.9919820706319304, 0.9943530146941199, 0.9893989712458262, 0.9772010532804356, 0.9841813689902942, 0.9873463038220005, 0.9816137851808386, 0.9522005888860408, 0.9936603338797065, 0.9931244718783088, 0.991934601781536, 0.9822107195517323, 0.9950646706466163, 0.8987708196567051, 0.09629687353464698, 0.2238714488551785, 0.7675592532177549, 0.6273834079990659, 0.36074545959946286, 0.9691618694910075, 0.9816686659892114, 0.9797426081386992, 0.3455829683189585, 0.6527678290469217, 0.9681593952219856, 0.9887965588868373, 0.9946156915683149, 0.2495717234493643, 0.7487151703480929, 0.9777903424641866, 0.9778149998930711, 0.9972088686617278, 0.32943820222238174, 0.3644848194800819, 0.29439158496468154, 0.32032495962006613, 0.1934037492045682, 0.3565881625959227, 0.1269212104154979, 0.9976472039157144, 0.6606682822645387, 0.20328254838908882, 0.13398167962008128, 0.31484148607157475, 0.6804638569934035, 0.9916035598849033, 0.6953579936112884, 0.3020241790432869, 0.9887374055461138, 0.2743922609042485, 0.7158058980110831, 0.9955560268104303, 0.36422099152849763, 0.27658887326600196, 0.3560054804413887, 0.9925926107391144, 0.37354339514346113, 0.05152322691633946, 0.4121858153307157, 0.1545696807490184, 0.9761985574919971, 0.9961859610622592, 0.9943997152037121, 0.998970282188748, 0.9852507987869966, 0.9725684402028718, 0.588085721650581, 0.403588240348438, 0.9922778839370754, 0.4029063785314085, 0.5949896520173126, 0.08327787308349063, 0.8077953689098591, 0.09993344770018876, 0.9867566905780231, 0.9913080893312748, 0.9839013169378007, 0.9777450700676662, 0.23534319965140146, 0.763639653035537, 0.9744443879921837, 0.9813282785290866, 0.9938238652194524, 0.30276857069796625, 0.540658161960654, 0.15138428534898313, 0.962498750091876, 0.9948904409617897, 0.9901430192278429, 0.5845756189406742, 0.4143255031151686, 0.9588715054036875, 0.9948231660335739, 0.9881379596226418, 0.201089074620762, 0.12065344477245721, 0.469207840781778, 0.2055577207234456, 0.9850518158621043, 0.9812577740932829, 0.9924627991422408, 0.9922386689571288, 0.3510935038819241, 0.5081616503554165, 0.13858954100602267, 0.9778917741088307, 0.9760404138206905, 0.889074427880695, 0.10128696013830703, 0.9664046054645367, 0.027351073739562356, 0.10320246920759844, 0.8919641981513865, 0.9956438478499992, 0.9812000470920373, 0.9812465863338651, 0.9851847931544688, 0.5471039205175506, 0.44920111368809423, 0.9952228772205365, 0.9961184550289994, 0.7366017687964191, 0.2624672969274597, 0.13487841122749308, 0.8638641100046581, 0.9987215849825917, 0.9853303227464986, 0.9858769126303789, 0.9847415136713537, 0.35717289546981906, 0.6357677539362779, 0.9897003419778014, 0.9961723634122845, 0.8138496443949987, 0.1752906926389228, 0.9861732080809644, 0.9729226598789371, 0.9826999186374495, 0.9811777894082352, 0.9874067118298127, 0.0260640233855513, 0.9643688652653982, 0.9835985731982076, 0.9916523305810142, 0.9883609741422464, 0.9754512158536512, 0.2983401107143771, 0.2597313905042813, 0.2913203434034506, 0.1509249971849202, 0.9822344568285153, 0.31488152459083085, 0.29291304613100544, 0.3807869599703071, 0.9788202953707436, 0.9823750242966318, 0.7984362085259153, 0.19677100873624453, 0.9963239508317538, 0.984023671327323, 0.9861195079853342, 0.9778798224638483, 0.9771328711529395, 0.7147305952911225, 0.28156053753892707, 0.2635798691063594, 0.37030811118713114, 0.36598712972637115, 0.9902868111330374, 0.9868916104492477, 0.3278532421439966, 0.26680470739994205, 0.4024681179422855, 0.9844504599360739, 0.9864332843346539, 0.9662266310521752, 0.9849073138141647, 0.9950019701477508, 0.9820342141136078, 0.9846480389185959, 0.18902814494749884, 0.37153807800025634, 0.365019866105515, 0.07170033084215473, 0.9734240976603598, 0.9899911892193768, 0.12611217613254141, 0.8633833596766296, 0.39550728829902404, 0.10408086534184843, 0.39550728829902404, 0.10408086534184843, 0.974521051984988, 0.1695391304903819, 0.5086173914711457, 0.31364739140720654, 0.9853486190874362, 0.9620838947947414, 0.9913218099540818, 0.6464569141588966, 0.34398624790106425, 0.2825662119179286, 0.5618657624264013, 0.031033283389830305, 0.12249980285459332, 0.983209439502868, 0.9897944020445697, 0.2531580528045715, 0.4524526901188086, 0.21545366196133742, 0.0754087816864681, 0.981881947757177, 0.2020460021639071, 0.7947142751780347, 0.21728482319921552, 0.2716060289990194, 0.5092613043731614, 0.782820454224234, 0.21464431809374157, 0.5699566401259759, 0.4274674800944819, 0.9787635424181425, 0.9857863087534213, 0.9726957291751784, 0.9908038679616483, 0.9951178536041316, 0.9731146627760376, 0.9710888267310676, 0.3367482737264223, 0.656373753873535, 0.990935545508059, 0.6100073446095331, 0.3887958899709112, 0.9935142778046783, 0.9787393653313168, 0.992312609636875, 0.97191951323352, 0.9982918778612075, 0.9941673137451361, 0.9748857942222183, 0.7730506669247355, 0.21803993169672023, 0.9920721681863988, 0.9945147436847197, 0.8609366876642546, 0.132451798102193, 0.9644271011873498, 0.9653963095002469, 0.9957906081013989, 0.9886475129605855, 0.06211644757522675, 0.9317467136284012, 0.9864985897998122, 0.9861227021931309, 0.9869917414840088, 0.9638573635015103, 0.9836329682195197, 0.9829477336494795, 0.997533865252311, 0.08749995716481354, 0.34539456775584293, 0.5618418302161711, 0.9831981219068526, 0.9846737529474392, 0.9715479793503401, 0.984724354569841, 0.9924167378565767, 0.9752224693109077, 0.9832869247233007, 0.9979896780297037, 0.19594376083160536, 0.7926815779096762, 0.9964086109754471, 0.11315406864038734, 0.6963327300946913, 0.18278734164985647, 0.6931475034770621, 0.21844648594428623, 0.056712068466305075, 0.0294062577232693, 0.7799794241678976, 0.2191370763138379, 0.9848736616595717, 0.9917952408803172, 0.99578130655948, 0.8645823891142485, 0.1300123893404885, 0.595928332405792, 0.36560020392993375, 0.03290401835369404, 0.980512086523294, 0.52549081337299, 0.33531318567609836, 0.13512620915305454, 0.9755449992130757, 0.3108856098239796, 0.6815569138448784, 0.5754132913324226, 0.4184823936963073, 0.9779371391026246, 0.17316654590745495, 0.8256580908867451, 0.987055664409514, 0.9777749860762166, 0.9840517001052201, 0.9906337893070115, 0.9694661798981893, 0.9775117039186214, 0.9726524358340535, 0.9757962050477078, 0.9647988356573246, 0.9800059601547092, 0.9923798435826604, 0.9733499636361503, 0.9937317504722062, 0.9957806100669344, 0.9776112601467487, 0.9914350751406247, 0.36698378963035877, 0.3519022640291111, 0.27146746082245715, 0.9789690475017926, 0.9585113880390947, 0.5402692556963399, 0.4574860632912556, 0.9766188825617951, 0.9085358328999451, 0.0908535832899945, 0.4756424232762548, 0.21150696483891912, 0.3127919902547396, 0.07823551281292267, 0.9158157088100948, 0.9830469972758623, 0.9922292641444307, 0.9584392442384514, 0.9693458834027381, 0.9966884374158853, 0.9934136961406193, 0.9837513223959967, 0.990193802593081, 0.9815329974322966, 0.9842607254401454, 0.9816426544509901, 0.9750481187541108, 0.9847296489428965, 0.9759970425763389, 0.46744376391903897, 0.5287478641051424, 0.9935607701903963, 0.9799234579062353, 0.6381816452983271, 0.3624871745294498, 0.9752198322983303, 0.8554731099912727, 0.14110896659649858, 0.9794433893322505, 0.986119956894997, 0.991399390488538, 0.1357114644247287, 0.3698137405573857, 0.4919540585396415, 0.9954017727872767, 0.9727692041941396, 0.9831341297058204, 0.28211431536003745, 0.5493805088590203, 0.15590527954107333, 0.9791513328735482, 0.017240266092724152, 0.9807795821638627, 0.9936155074821638, 0.9735733038880598, 0.4130021691339703, 0.43314861640879815, 0.15109835456120865, 0.9824727890411505, 0.9588832351551765, 0.9885011322692369, 0.9806002693636457, 0.9794341186071028, 0.9916046711054951, 0.9732114954086515, 0.9774118408265636, 0.8431188265922029, 0.09367986962135588, 0.057649150536219, 0.9958726185957777, 0.9840547659009464, 0.9818336568660491, 0.9909999757995204, 0.990166543832711, 0.5583895870634786, 0.43840504769446664, 0.9831913115200858, 0.997490654840102, 0.9931907092056377, 0.9889880538475962, 0.9948975536163848, 0.9878587549421389, 0.38022847252287484, 0.1417801083983601, 0.0622973203568552, 0.1697064933859159, 0.14392829185894132, 0.10096462264731705, 0.9780987232443894, 0.5627083519722761, 0.2237066842703238, 0.0068832825929330405, 0.2064984777879912, 0.9796323239951884, 0.995456244242361, 0.3803289213505208, 0.29665655865340623, 0.21298419595629167, 0.10649209797814584, 0.3067953570206528, 0.6802853568718823, 0.9936686567327828, 0.9954981224970466, 0.713135413108433, 0.27733043843105726, 0.17112316894478405, 0.6961601645708261, 0.13223153963915132, 0.18520516507832646, 0.7978068649527909, 0.9971915483005411, 0.9924500176186242, 0.982362003923044, 0.9831282112371847, 0.9852593445511061, 0.6862987444112777, 0.30672569582626935, 0.904843255740181, 0.08721380778218611, 0.9852707640841629, 0.9823752211378575, 0.9921883883851059, 0.9677659423461334, 0.9822808617898667, 0.9875616660555039, 0.12196437777396336, 0.8689961916394889, 0.992622378627758, 0.989654188013202, 0.6392251111122423, 0.34957623263950754, 0.978843312385668, 0.9594641697640313, 0.11122255765211411, 0.12293019529970506, 0.7317273529744349, 0.032196003530875136, 0.825117980440858, 0.1727894123746738, 0.9864583786292694, 0.9827775158671783, 0.9835299468677853, 0.9719458889142223, 0.6655214705855064, 0.3274788188595349, 0.01642352435366653, 0.31204696271966403, 0.29014893024810867, 0.3777410601343301, 0.9960149982818773, 0.7983415930081744, 0.1995853982520436, 0.18321097154839439, 0.0799466057665721, 0.4430374402897537, 0.2165220572844661, 0.07661549719296493, 0.9848833493465513, 0.9830173453645817, 0.2817275269716588, 0.7099533679685802, 0.4284219033074417, 0.3985320030766899, 0.11641329563555942, 0.056109110959481345, 0.9963659634346442, 0.27463127178064944, 0.08476273820390415, 0.17291598593596447, 0.4644998053573947, 0.9850882902873828], "Term": ["access", "access", "access", "accounting", "act", "action", "action", "action", "address", "advertising", "adviser", "agency", "agency", "agreed", "agreement", "agreement", "aid", "aig", "aim", "air", "airbus", "aircraft", "airline", "airway", "alleged", "aluminum", "american", "american", "analyst", "analyst", "analyst", "announced", "announced", "announcement", "appeal", "appeared", "apple", "application", "application", "approval", "approved", "asia", "asia", "asian", "asked", "asked", "asset", "attempt", "auction", "august", "august", "australia", "australian", "authority", "auto", "automaker", "average", "average", "backed", "bad", "bad", "bailout", "bank", "bank", "banking", "banking", "bankruptcy", "barclays", "barrel", "based", "based", "basel", "battery", "beginning", "beijing", "bernanke", "bid", "bid", "bigger", "biggest", "biggest", "billion", "bit", "board", "body", "boeing", "bond", "bond", "book", "boosted", "borrower", "boston", "brand", "brand", "break", "bringing", "britain", "british", "brokerage", "brokerage", "budget", "budget", "buffett", "build", "bush", "business", "business", "business", "business", "buy", "buy", "cable", "call", "call", "campaign", "canada", "cap", "capacity", "capital", "capital", "car", "card", "care", "carmaker", "carrier", "case", "case", "case", "cautious", "cbs", "cent", "ceo", "ceo", "cerberus", "chain", "chairman", "charge", "charge", "chicago", "chief", "chief", "china", "chinese", "chrysler", "citigroup", "citigroup", "civil", "claim", "claim", "class", "client", "client", "close", "closed", "coal", "collapse", "comment", "comment", "commercial", "commission", "commission", "commission", "commodity", "company", "compensation", "compensation", "competition", "competition", "competitive", "competitor", "complaint", "completed", "component", "computer", "concern", "concern", "concern", "concern", "condition", "confident", "congress", "consumer", "continued", "contract", "contract", "corp", "corp", "corp", "cost", "cost", "cost", "cost", "cost", "count", "country", "country", "country", "court", "cover", "credit", "creditor", "criminal", "crisis", "crude", "currency", "current", "customer", "customer", "cut", "cut", "dairy", "data", "data", "day", "day", "day", "deal", "debt", "debt", "decide", "decision", "decision", "decision", "decline", "defendant", "defense", "defense", "deficit", "dell", "demand", "demand", "demand", "deposit", "derivative", "detroit", "developed", "development", "development", "development", "device", "digital", "director", "discount", "discus", "discussion", "disruption", "division", "doesn", "dollar", "dollar", "domestic", "domestic", "don", "don", "don", "double", "dow", "dropped", "dropped", "drug", "dubai", "duty", "duty", "eads", "earnings", "earnings", "ecb", "economic", "economic", "economist", "economy", "economy", "editing", "editing", "editing", "editing", "effectively", "employee", "employee", "employer", "employment", "end", "end", "end", "energy", "engine", "engine", "equity", "error", "euro", "euro", "europe", "europe", "europe", "european", "european", "european", "exchange", "exchange", "excluding", "executive", "expectation", "expectation", "expectation", "expected", "expected", "expense", "export", "exposure", "exposure", "face", "face", "face", "fall", "fall", "family", "family", "february", "fed", "federal", "federal", "federal", "fee", "filed", "filed", "filing", "filing", "film", "financial", "financial", "firm", "firm", "firm", "firm", "flat", "flight", "food", "force", "force", "ford", "forecast", "forecast", "foreign", "foreign", "forward", "found", "founder", "france", "fraud", "french", "french", "fresh", "friday", "friday", "fuel", "fuel", "fund", "fund", "fundamental", "future", "future", "future", "gain", "gain", "gas", "gasoline", "gave", "gdp", "german", "germany", "germany", "giant", "give", "give", "glencore", "gmt", "goal", "gold", "gold", "goldman", "good", "good", "good", "good", "google", "government", "government", "greece", "greek", "group", "group", "group", "group", "growth", "growth", "guarantee", "hard", "hard", "head", "head", "head", "hearing", "heavily", "helped", "helped", "helped", "high", "high", "high", "high", "high", "higher", "higher", "higher", "highest", "hiring", "hit", "hit", "hit", "holiday", "home", "home", "home", "honda", "hour", "household", "houston", "huge", "hughes", "hungary", "imf", "import", "improvement", "incentive", "incentive", "including", "including", "including", "including", "including", "including", "income", "increase", "increase", "increase", "index", "index", "index", "india", "industry", "industry", "industry", "industry", "inflation", "initial", "initially", "insurer", "interest", "international", "international", "international", "internet", "intervention", "interview", "inventory", "investigation", "investment", "investor", "investor", "investor", "ipo", "ireland", "irish", "issue", "issue", "italian", "italy", "item", "item", "january", "japan", "japan", "japanese", "jersey", "jet", "job", "job", "job", "job", "jones", "jpmorgan", "judge", "july", "keeping", "kind", "klm", "kraft", "labor", "land", "large", "largest", "launch", "lawmaker", "lawsuit", "lawyer", "lawyer", "leader", "leader", "led", "led", "lee", "legal", "letter", "level", "level", "libor", "libya", "limit", "line", "line", "list", "listed", "loan", "london", "london", "london", "long", "long", "long", "long", "loss", "low", "low", "low", "lower", "lower", "lowest", "made", "made", "madoff", "main", "main", "major", "make", "make", "make", "maker", "management", "management", "management", "management", "manufacturer", "march", "margin", "market", "massive", "mastercard", "measure", "measure", "medium", "meeting", "meeting", "member", "member", "member", "merger", "metal", "microsoft", "military", "million", "million", "mining", "minute", "mobile", "model", "model", "model", "momentum", "monday", "monetary", "month", "month", "moody", "mortgage", "motorola", "move", "move", "move", "move", "moving", "music", "named", "nasdaq", "needed", "needed", "needed", "negative", "negotiation", "net", "net", "network", "network", "news", "news", "newspaper", "nokia", "note", "noted", "november", "november", "obama", "offer", "officer", "officer", "official", "official", "oil", "online", "opec", "opening", "operation", "operation", "operator", "order", "outlook", "outlook", "output", "oversight", "owner", "owns", "pace", "package", "package", "panel", "paper", "paris", "parliament", "part", "part", "part", "part", "partly", "partner", "partner", "partner", "passenger", "patent", "pay", "pay", "payment", "payroll", "peak", "pension", "pentagon", "people", "people", "percent", "percent", "percent", "performance", "phone", "plan", "plan", "plan", "plane", "plant", "player", "plc", "policy", "poll", "poor", "position", "position", "position", "position", "possibly", "post", "posted", "posted", "potential", "potential", "potential", "potential", "pound", "power", "power", "power", "practice", "pre", "premium", "president", "president", "price", "price", "price", "price", "pricing", "probe", "problem", "problem", "problem", "problem", "producer", "product", "product", "production", "production", "production", "profit", "profit", "program", "program", "progress", "project", "prompted", "property", "proposal", "proposed", "protest", "public", "public", "put", "quarter", "quarter", "question", "rajoy", "rally", "rapidly", "rate", "rating", "reading", "recent", "recent", "recession", "record", "recovery", "recovery", "reducing", "referring", "reform", "regulation", "regulator", "regulator", "regulatory", "release", "remaining", "remark", "renault", "replace", "report", "reported", "reported", "reported", "representative", "require", "required", "requirement", "rescue", "response", "restaurant", "result", "retail", "retail", "retailer", "return", "return", "return", "reuters", "reuters", "reuters", "reuters", "revenue", "revenue", "right", "rim", "rise", "rising", "rising", "risk", "risk", "risk", "robert", "rose", "rose", "rose", "roughly", "rule", "rule", "run", "run", "russia", "sale", "sale", "saturday", "saudi", "save", "saving", "scale", "scandal", "scheduled", "scheme", "school", "search", "sec", "secretary", "sector", "security", "see", "seeking", "sell", "sell", "sell", "senate", "separately", "service", "service", "session", "set", "set", "share", "share", "share", "shareholder", "shareholder", "sharp", "sharply", "shipment", "shopper", "show", "sign", "signed", "similar", "slightly", "slow", "slowdown", "social", "software", "solid", "source", "source", "spain", "spanish", "spending", "spending", "split", "spokesman", "spokesman", "spokeswoman", "stability", "stake", "state", "state", "state", "statement", "stay", "steel", "step", "step", "step", "stephen", "stock", "stock", "store", "strike", "strong", "strong", "strong", "structure", "subsidiary", "subsidy", "success", "successful", "summer", "summit", "supplier", "supply", "supply", "supply", "support", "survey", "swap", "system", "takeover", "talk", "talk", "tanker", "target", "tax", "taxpayer", "technology", "test", "thursday", "thursday", "thursday", "thursday", "thursday", "thursday", "tightening", "time", "time", "time", "time", "tokyo", "told", "top", "top", "top", "top", "tough", "tough", "toyota", "trade", "trader", "trader", "trading", "trading", "trading", "transaction", "transaction", "treasury", "trend", "trial", "truck", "trust", "tuesday", "tuesday", "ubs", "ubs", "underlying", "unemployment", "vehicle", "versus", "video", "volatility", "vote", "vote", "warned", "way", "weak", "weak", "weaker", "weather", "wednesday", "wednesday", "wednesday", "wednesday", "week", "week", "weekend", "weekly", "william", "wireless", "won", "won", "work", "work", "work", "work", "worker", "working", "working", "world", "world", "world", "world", "world", "worry", "worst", "writing", "writing", "year", "year", "year", "year", "yen", "york", "york", "york", "york", "yuan"]}, "R": 30, "lambda.step": 0.01, "plot.opts": {"xlab": "PC1", "ylab": "PC2"}, "topic.order": [15, 11, 13, 7, 14, 10, 2, 5, 9, 1, 4, 8, 12, 6, 3]};
+
+   !function(LDAvis){
+       new LDAvis("#" + "ldavis_el1911771396656165339281508491739", ldavis_el1911771396656165339281508491739_data);
+   }(LDAvis);
+
+
+</script>
